@@ -41,6 +41,7 @@ type BuildResp struct {
 	Name        string                              `json:"name"`
 	Targets     []*commonmodels.ServiceModuleTarget `json:"targets"`
 	KeyVals     []*commonmodels.KeyVal              `json:"key_vals"`
+	Repos       []*types.Repository                 `json:"repos"`
 	UpdateTime  int64                               `json:"update_time"`
 	UpdateBy    string                              `json:"update_by"`
 	Pipelines   []string                            `json:"pipelines"`
@@ -118,7 +119,7 @@ func ListBuild(name, targets, productName string, log *zap.SugaredLogger) ([]*Bu
 	return resp, nil
 }
 
-func ListBuildModulesByServiceModule(productName string, log *zap.SugaredLogger) ([]*ServiceModuleAndBuildResp, error) {
+func ListBuildModulesByServiceModule(encryptedKey, productName string, excludeJenkins bool, log *zap.SugaredLogger) ([]*ServiceModuleAndBuildResp, error) {
 	services, err := commonrepo.NewServiceColl().ListMaxRevisionsByProduct(productName)
 	if err != nil {
 		return nil, e.ErrListBuildModule.AddErr(err)
@@ -141,10 +142,38 @@ func ListBuildModulesByServiceModule(productName string, log *zap.SugaredLogger)
 			}
 			var resp []*BuildResp
 			for _, build := range buildModules {
+				if excludeJenkins && build.JenkinsBuild != nil {
+					continue
+				}
+				// get build env vars when it's a template build
+				if build.TemplateID != "" {
+					templateEnvs := []*commonmodels.KeyVal{}
+					buildTemplate, err := commonrepo.NewBuildTemplateColl().Find(&commonrepo.BuildTemplateQueryOption{
+						ID: build.TemplateID,
+					})
+					// if template not found, envs are empty, but do not block user.
+					if err != nil {
+						log.Errorf("build job: %s, template not found", build.Name)
+					} else {
+						templateEnvs = buildTemplate.PreBuild.Envs
+					}
+
+					for _, target := range build.Targets {
+						if target.ServiceModule == container.Name && target.ServiceName == serviceTmpl.ServiceName {
+							build.PreBuild.Envs = target.Envs
+							build.Repos = target.Repos
+						}
+					}
+					build.PreBuild.Envs = commonservice.MergeBuildEnvs(templateEnvs, build.PreBuild.Envs)
+				}
+				if err := commonservice.EncryptKeyVals(encryptedKey, build.PreBuild.Envs, log); err != nil {
+					return serviceModuleAndBuildResp, err
+				}
 				resp = append(resp, &BuildResp{
 					ID:      build.ID.Hex(),
 					Name:    build.Name,
 					KeyVals: build.PreBuild.Envs,
+					Repos:   build.Repos,
 				})
 			}
 			serviceModuleAndBuildResp = append(serviceModuleAndBuildResp, &ServiceModuleAndBuildResp{
@@ -220,12 +249,62 @@ func UpdateBuild(username string, build *commonmodels.Build, log *zap.SugaredLog
 		return err
 	}
 
+	if err = updateCvmService(build, existed); err != nil {
+		log.Warnf("failed to update cvm service,err:%s", err)
+	}
+
 	build.UpdateBy = username
 	build.UpdateTime = time.Now().Unix()
-
 	if err := commonrepo.NewBuildColl().Update(build); err != nil {
 		log.Errorf("[Build.Upsert] %s error: %v", build.Name, err)
 		return e.ErrUpdateBuildModule.AddErr(err)
+	}
+
+	return nil
+}
+
+func updateCvmService(currentBuild, oldBuild *commonmodels.Build) error {
+	deleteServices := sets.NewString()
+	currentServiceModuleKey := sets.NewString()
+	for _, currentServiceModule := range currentBuild.Targets {
+		currentServiceModuleKey.Insert(fmt.Sprintf("%s-%s-%s", currentServiceModule.ProductName, currentServiceModule.ServiceName, currentServiceModule.ServiceModule))
+	}
+
+	for _, oldServiceModule := range oldBuild.Targets {
+		if !currentServiceModuleKey.Has(fmt.Sprintf("%s-%s-%s", oldServiceModule.ProductName, oldServiceModule.ServiceName, oldServiceModule.ServiceModule)) {
+			deleteServices.Insert(oldServiceModule.ServiceName)
+		}
+	}
+
+	for _, serviceName := range deleteServices.List() {
+		opt := &commonrepo.ServiceFindOption{
+			ServiceName:   serviceName,
+			Type:          setting.PMDeployType,
+			ProductName:   currentBuild.ProductName,
+			ExcludeStatus: setting.ProductStatusDeleting,
+		}
+
+		resp, err := commonrepo.NewServiceColl().Find(opt)
+		if err != nil {
+			continue
+		}
+
+		serviceTemplate := fmt.Sprintf(setting.ServiceTemplateCounterName, resp.ServiceName, resp.ProductName)
+		rev, err := commonrepo.NewCounterColl().GetNextSeq(serviceTemplate)
+		if err != nil {
+			return err
+		}
+		resp.Revision = rev
+
+		if err := commonrepo.NewServiceColl().Delete(resp.ServiceName, resp.Type, resp.ProductName, setting.ProductStatusDeleting, resp.Revision); err != nil {
+			log.Errorf("failed to delete service %s, error: %s", resp.ServiceName, err)
+			return err
+		}
+		resp.BuildName = ""
+		if err := commonrepo.NewServiceColl().Create(resp); err != nil {
+			log.Errorf("failed to delete service %s, error: %s", resp.ServiceName, err)
+			return err
+		}
 	}
 
 	return nil

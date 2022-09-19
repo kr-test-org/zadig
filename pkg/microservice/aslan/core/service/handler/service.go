@@ -83,16 +83,23 @@ func CreateServiceTemplate(c *gin.Context) {
 	if err = json.Unmarshal(data, args); err != nil {
 		log.Errorf("CreateServiceTemplate json.Unmarshal err : %v", err)
 	}
-	internalhandler.InsertOperationLog(c, ctx.UserName, args.ProductName, "新增", "项目管理-服务", fmt.Sprintf("服务名称:%s,版本号:%d", args.ServiceName, args.Revision), string(data), ctx.Logger)
+	internalhandler.InsertOperationLog(c, ctx.UserName, args.ProductName, "新增", "项目管理-服务", fmt.Sprintf("服务名称:%s", args.ServiceName), string(data), ctx.Logger)
 	c.Request.Body = ioutil.NopCloser(bytes.NewBuffer(data))
 
 	if err := c.BindJSON(args); err != nil {
 		ctx.Err = e.ErrInvalidParam.AddDesc("invalid ServiceTmpl json args")
 		return
 	}
+
+	force, err := strconv.ParseBool(c.Query("force"))
+	if err != nil {
+		ctx.Err = e.ErrInvalidParam.AddDesc("force params error")
+		return
+	}
+
 	args.CreateBy = ctx.UserName
 
-	ctx.Resp, ctx.Err = svcservice.CreateServiceTemplate(ctx.UserName, args, ctx.Logger)
+	ctx.Resp, ctx.Err = svcservice.CreateServiceTemplate(ctx.UserName, args, force, ctx.Logger)
 }
 
 func UpdateServiceTemplate(c *gin.Context) {
@@ -181,6 +188,10 @@ func HelmReleaseNaming(c *gin.Context) {
 		ctx.Err = e.ErrInvalidParam.AddDesc("invalid yaml args")
 		return
 	}
+
+	bs, _ := json.Marshal(args)
+	internalhandler.InsertOperationLog(c, ctx.UserName, projectName, "修改", "项目管理-服务", args.ServiceName, string(bs), ctx.Logger)
+
 	ctx.Err = svcservice.UpdateReleaseNamingRule(ctx.UserName, ctx.RequestID, projectName, args, ctx.Logger)
 }
 
@@ -208,7 +219,19 @@ func UpdateWorkloads(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 	args := new(svcservice.UpdateWorkloadsArgs)
-	err := c.ShouldBindJSON(args)
+
+	data, err := c.GetRawData()
+	if err != nil {
+		log.Errorf("UpdateWorkloads c.GetRawData() err : %v", err)
+	}
+	if err = json.Unmarshal(data, args); err != nil {
+		log.Errorf("UpdateWorkloads json.Unmarshal err : %v", err)
+	}
+
+	c.Request.Body = ioutil.NopCloser(bytes.NewBuffer(data))
+	internalhandler.InsertDetailedOperationLog(c, ctx.UserName, c.Query("projectName"), setting.OperationSceneEnv, "配置", "环境", c.Query("env"), string(data), ctx.Logger, c.Query("env"))
+
+	err = c.ShouldBindJSON(args)
 	if err != nil {
 		ctx.Err = e.ErrInvalidParam.AddDesc("invalid UpdateWorkloadsArgs")
 		return
@@ -235,7 +258,19 @@ func CreateK8sWorkloads(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 	args := new(svcservice.K8sWorkloadsArgs)
-	err := c.BindJSON(args)
+
+	data, err := c.GetRawData()
+	if err != nil {
+		log.Errorf("CreateK8sWorkloads c.GetRawData() err : %v", err)
+	}
+	if err = json.Unmarshal(data, args); err != nil {
+		log.Errorf("CreateK8sWorkloads json.Unmarshal err : %v", err)
+	}
+
+	c.Request.Body = ioutil.NopCloser(bytes.NewBuffer(data))
+	internalhandler.InsertDetailedOperationLog(c, ctx.UserName, c.Query("projectName"), setting.OperationSceneEnv, "新增", "环境", args.EnvName, string(data), ctx.Logger, args.EnvName)
+
+	err = c.BindJSON(args)
 	if err != nil {
 		ctx.Err = e.ErrInvalidParam.AddDesc("invalid K8sWorkloadsArgs args")
 		return

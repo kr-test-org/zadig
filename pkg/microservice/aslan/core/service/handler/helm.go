@@ -17,6 +17,8 @@ limitations under the License.
 package handler
 
 import (
+	"encoding/json"
+	"fmt"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -72,6 +74,20 @@ func GetFileContent(c *gin.Context) {
 	ctx.Resp, ctx.Err = svcservice.GetFileContent(c.Param("serviceName"), c.Param("productName"), param, ctx.Logger)
 }
 
+func UpdateFileContent(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	param := new(svcservice.HelmChartEditInfo)
+	err := c.ShouldBind(param)
+	if err != nil {
+		ctx.Err = e.ErrInvalidParam.AddErr(err)
+		return
+	}
+
+	ctx.Err = svcservice.EditFileContent(c.Param("serviceName"), c.Query("projectName"), ctx.UserName, ctx.RequestID, param, ctx.Logger)
+}
+
 func CreateOrUpdateHelmService(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
@@ -89,7 +105,33 @@ func CreateOrUpdateHelmService(c *gin.Context) {
 	}
 	args.CreatedBy, args.RequestID = ctx.UserName, ctx.RequestID
 
-	ctx.Resp, ctx.Err = svcservice.CreateOrUpdateHelmService(projectName, args, ctx.Logger)
+	bs, _ := json.Marshal(args)
+	internalhandler.InsertOperationLog(c, ctx.UserName, projectName, "新增", "项目管理-服务", fmt.Sprintf("服务名称:%s", args.Name), string(bs), ctx.Logger)
+
+	ctx.Resp, ctx.Err = svcservice.CreateOrUpdateHelmService(projectName, args, false, ctx.Logger)
+}
+
+func UpdateHelmService(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	projectName := c.Query("projectName")
+	if projectName == "" {
+		ctx.Err = e.ErrInvalidParam.AddDesc("projectName can't be nil")
+		return
+	}
+
+	args := new(svcservice.HelmServiceCreationArgs)
+	if err := c.BindJSON(args); err != nil {
+		ctx.Err = e.ErrInvalidParam.AddDesc("invalid HelmService json args")
+		return
+	}
+	args.CreatedBy, args.RequestID = ctx.UserName, ctx.RequestID
+
+	bs, _ := json.Marshal(args)
+	internalhandler.InsertOperationLog(c, ctx.UserName, projectName, "更新", "项目管理-服务", fmt.Sprintf("服务名称:%s", args.Name), string(bs), ctx.Logger)
+
+	ctx.Resp, ctx.Err = svcservice.CreateOrUpdateHelmService(projectName, args, true, ctx.Logger)
 }
 
 func CreateOrUpdateBulkHelmServices(c *gin.Context) {
@@ -109,20 +151,8 @@ func CreateOrUpdateBulkHelmServices(c *gin.Context) {
 	}
 	args.CreatedBy, args.RequestID = ctx.UserName, ctx.RequestID
 
-	ctx.Resp, ctx.Err = svcservice.CreateOrUpdateBulkHelmService(projectName, args, ctx.Logger)
-}
+	bs, _ := json.Marshal(args)
+	internalhandler.InsertOperationLog(c, ctx.UserName, c.Query("projectName"), "新增", "项目管理-服务", "", string(bs), ctx.Logger)
 
-func UpdateHelmService(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
-	defer func() { internalhandler.JSONResponse(c, ctx) }()
-
-	args := new(svcservice.HelmServiceArgs)
-	if err := c.BindJSON(args); err != nil {
-		ctx.Err = e.ErrInvalidParam.AddDesc("invalid HelmServiceArgs json args")
-		return
-	}
-	args.CreateBy = ctx.UserName
-	args.ProductName = c.Param("productName")
-
-	ctx.Err = svcservice.UpdateHelmService(args, ctx.Logger)
+	ctx.Resp, ctx.Err = svcservice.CreateOrUpdateBulkHelmService(projectName, args, false, ctx.Logger)
 }

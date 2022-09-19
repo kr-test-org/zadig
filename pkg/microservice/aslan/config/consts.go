@@ -86,6 +86,8 @@ const (
 	ServiceType PipelineType = "service"
 	// WorkflowTypeV3
 	WorkflowTypeV3 PipelineType = "workflow_v3"
+	// WorkflowTypeV4
+	WorkflowTypeV4 PipelineType = "workflow_v4"
 	// ArtifactPackageType package artifact
 	ArtifactType PipelineType = "artifact"
 	// ScanningType is the type for scanning
@@ -158,6 +160,7 @@ const (
 	StepDockerBuild       StepType = "docker_build"
 	StepDeploy            StepType = "deploy"
 	StepHelmDeploy        StepType = "helm_deploy"
+	StepCustomDeploy      StepType = "custom_deploy"
 	StepImageDistribute   StepType = "image_distribute"
 	StepArchive           StepType = "archive"
 	StepArchiveDistribute StepType = "archive_distribute"
@@ -168,11 +171,14 @@ const (
 type JobType string
 
 const (
-	JobBuild       JobType = "build"
-	JobDeploy      JobType = "deploy"
-	JobZadigBuild  JobType = "zadig-build"
-	JobZadigDeploy JobType = "zadig-deploy"
-	JobFreestyle   JobType = "freestyle"
+	JobBuild           JobType = "build"
+	JobDeploy          JobType = "deploy"
+	JobZadigBuild      JobType = "zadig-build"
+	JobCustomDeploy    JobType = "custom-deploy"
+	JobZadigDeploy     JobType = "zadig-deploy"
+	JobZadigHelmDeploy JobType = "zadig-helm-deploy"
+	JobFreestyle       JobType = "freestyle"
+	JobPlugin          JobType = "plugin"
 )
 
 type ApproveOrReject string
@@ -280,4 +286,25 @@ const (
 	CommonEnvCfgTypeConfigMap CommonEnvCfgType = "ConfigMap"
 	CommonEnvCfgTypeSecret    CommonEnvCfgType = "Secret"
 	CommonEnvCfgTypePvc       CommonEnvCfgType = "PVC"
+)
+
+type ProjectType string
+
+const (
+	ProjectTypeHelm   = "helm"
+	ProjectTypeYaml   = "yaml"
+	ProjectTypeVM     = "vm"
+	ProjectTypeLoaded = "loaded"
+)
+
+type RegistryProvider string
+
+const (
+	RegistryProviderACR       = "acr"
+	RegistryProviderSWR       = "swr"
+	RegistryProviderTCR       = "tcr"
+	RegistryProviderHarbor    = "harbor"
+	RegistryProviderDockerhub = "dockerhub"
+	RegistryProviderECR       = "ecr"
+	RegistryProviderNative    = "native"
 )

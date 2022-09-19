@@ -35,18 +35,22 @@ spec:
     spec:
       containers:
       - name: nginx-test
-        image: ccr.ccs.tencentyun.com/shuhe/nginx:stable
+        image: koderover.tencentcloudcr.com/koderover-demo/nginx
         ports:
         - containerPort: 80
         volumeMounts:
           - name: static-page
             mountPath: /usr/share/nginx/html
+        resources:
+          limits:
+            memory: 50Mi
+            cpu: 50m
       volumes:
         - name: static-page
           configMap:
             name: static-page
 ---
-apiVersion: extensions/v1beta1
+apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: nginx-expose
@@ -56,9 +60,12 @@ spec:
     http:
       paths:
       - backend:
-          serviceName: nginx
-          servicePort: 80
+          service:
+            name: nginx
+            port:
+              number: 80
         path: /
+        pathType: Prefix
 ---
 apiVersion: v1
 kind: ConfigMap

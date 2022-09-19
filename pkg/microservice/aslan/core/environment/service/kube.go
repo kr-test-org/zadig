@@ -17,7 +17,13 @@ limitations under the License.
 package service
 
 import (
+	"archive/tar"
 	"fmt"
+	"io"
+	"os"
+	"path"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -27,10 +33,16 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/kubectl/pkg/scheme"
 
+	commonconfig "github.com/koderover/zadig/pkg/config"
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/kube"
+	"github.com/koderover/zadig/pkg/microservice/podexec/core/service"
 	"github.com/koderover/zadig/pkg/setting"
 	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
 	"github.com/koderover/zadig/pkg/shared/kube/resource"
@@ -39,6 +51,7 @@ import (
 	"github.com/koderover/zadig/pkg/tool/kube/getter"
 	"github.com/koderover/zadig/pkg/tool/kube/updater"
 	"github.com/koderover/zadig/pkg/tool/kube/util"
+	"github.com/koderover/zadig/pkg/tool/log"
 )
 
 type serviceInfo struct {
@@ -135,20 +148,27 @@ func ListAvailableNamespaces(clusterID, listType string, log *zap.SugaredLogger)
 		}
 		filterK8sNamespaces.Insert(nsList...)
 	}
-	for _, namespace := range namespaces {
+
+	filter := func(namespace *corev1.Namespace) bool {
+		if listType == setting.ListNamespaceTypeALL {
+			return true
+		}
 		if value, IsExist := namespace.Labels[setting.EnvCreatedBy]; IsExist {
 			if value == setting.EnvCreator {
-				continue
+				return false
 			}
 		}
-
 		if filterK8sNamespaces.Has(namespace.Name) {
-			continue
+			return false
 		}
-
-		resp = append(resp, wrapper.Namespace(namespace).Resource())
+		return true
 	}
 
+	for _, namespace := range namespaces {
+		if filter(namespace) {
+			resp = append(resp, wrapper.Namespace(namespace).Resource())
+		}
+	}
 	return resp, nil
 }
 
@@ -202,6 +222,177 @@ func DeletePod(envName, productName, podName string, log *zap.SugaredLogger) err
 		return e.ErrDeletePod.AddDesc(errMsg)
 	}
 	return nil
+}
+
+func getPrefix(file string) string {
+	return strings.TrimLeft(file, "/")
+}
+
+func stripPathShortcuts(p string) string {
+	newPath := path.Clean(p)
+	trimmed := strings.TrimPrefix(newPath, "../")
+
+	for trimmed != newPath {
+		newPath = trimmed
+		trimmed = strings.TrimPrefix(newPath, "../")
+	}
+
+	// trim leftover {".", ".."}
+	if newPath == "." || newPath == ".." {
+		newPath = ""
+	}
+
+	if len(newPath) > 0 && string(newPath[0]) == "/" {
+		return newPath[1:]
+	}
+
+	return newPath
+}
+
+func unTarAll(reader io.Reader, destDir, prefix string) error {
+	tarReader := tar.NewReader(reader)
+	for {
+		header, err := tarReader.Next()
+		if err != nil {
+			if err != io.EOF {
+				return err
+			}
+			break
+		}
+
+		if !strings.HasPrefix(header.Name, prefix) {
+			return fmt.Errorf("tar contents corrupted")
+		}
+
+		mode := header.FileInfo().Mode()
+		destFileName := filepath.Join(destDir, header.Name[len(prefix):])
+
+		baseName := filepath.Dir(destFileName)
+		if err := os.MkdirAll(baseName, 0755); err != nil {
+			return err
+		}
+		if header.FileInfo().IsDir() {
+			if err := os.MkdirAll(destFileName, 0755); err != nil {
+				return err
+			}
+			continue
+		}
+
+		evaledPath, err := filepath.EvalSymlinks(baseName)
+		if err != nil {
+			return err
+		}
+
+		if mode&os.ModeSymlink != 0 {
+			linkname := header.Linkname
+
+			if !filepath.IsAbs(linkname) {
+				_ = filepath.Join(evaledPath, linkname)
+			}
+
+			if err := os.Symlink(linkname, destFileName); err != nil {
+				return err
+			}
+		} else {
+			outFile, err := os.Create(destFileName)
+			if err != nil {
+				return err
+			}
+			defer outFile.Close()
+			if _, err := io.Copy(outFile, tarReader); err != nil {
+				return err
+			}
+			if err := outFile.Close(); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func execPodCopy(kubeClient kubernetes.Interface, cfg *rest.Config, cmd []string, filePath, targetDir, namespace, podName, containerName string) (string, error) {
+	req := kubeClient.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(podName).
+		Namespace(namespace).
+		SubResource("exec")
+
+	req.VersionedParams(&corev1.PodExecOptions{
+		Container: containerName,
+		Command:   cmd,
+		Stdin:     true,
+		Stdout:    true,
+		Stderr:    true,
+		TTY:       false,
+	}, scheme.ParameterCodec)
+
+	executor, err := remotecommand.NewSPDYExecutor(cfg, "POST", req.URL())
+	if err != nil {
+		log.Errorf("NewSPDYExecutor err: %v", err)
+		return "", err
+	}
+
+	reader, outStream := io.Pipe()
+
+	go func() {
+		defer outStream.Close()
+		err = executor.Stream(remotecommand.StreamOptions{
+			Stdin:  os.Stdin,
+			Stdout: outStream,
+			Stderr: os.Stderr,
+		})
+		if err != nil {
+			log.Errorf("steam failed: %s", err)
+		}
+	}()
+
+	prefix := getPrefix(filePath)
+	prefix = path.Clean(prefix)
+	prefix = stripPathShortcuts(prefix)
+	destPath := path.Join(targetDir, path.Base(prefix))
+	err = unTarAll(reader, destPath, prefix)
+	return destPath, err
+}
+
+func podFileTmpPath(envName, productName, podName, container string) string {
+	return filepath.Join(commonconfig.DataPath(), "podfile", productName, envName, podName, container)
+}
+
+func DownloadFile(envName, productName, podName, container, path string, log *zap.SugaredLogger) ([]byte, string, error) {
+	product, err := commonrepo.NewProductColl().Find(&commonrepo.ProductFindOptions{
+		Name:    productName,
+		EnvName: envName,
+	})
+	if err != nil {
+		return nil, "", err
+	}
+
+	kubeClient, err := kubeclient.GetKubeClient(config.HubServerAddress(), product.ClusterID)
+	if err != nil {
+		return nil, "", e.ErrGetPodFile.AddErr(err)
+	}
+
+	_, exist, err := getter.GetPod(product.Namespace, podName, kubeClient)
+	if err != nil {
+		return nil, "", e.ErrGetPodFile.AddErr(err)
+	}
+	if !exist {
+		return nil, "", e.ErrGetPodFile.AddDesc(fmt.Sprintf("pod: %s not exits", podName))
+	}
+
+	kubeCli, cfg, err := service.NewKubeOutClusterClient(product.ClusterID)
+	if err != nil {
+		return nil, "", e.ErrGetPodFile.AddDesc(fmt.Sprintf("get kubecli err :%v", err))
+	}
+
+	localPath, err := execPodCopy(kubeCli, cfg, []string{"tar", "cf", "-", path}, path, podFileTmpPath(envName, productName, podName, container), product.Namespace, podName, container)
+	if err != nil {
+		return nil, "", e.ErrGetPodFile.AddErr(err)
+	}
+
+	fileBytes, err := os.ReadFile(localPath)
+	return fileBytes, localPath, err
 }
 
 // getServiceFromObjectMetaList returns a set of services which are modified since last update.
@@ -291,4 +482,61 @@ func nodeLabel(node *corev1.Node) []string {
 		labels = append(labels, fmt.Sprintf("%s:%s", key, value))
 	}
 	return labels
+}
+
+func ListNamespace(clusterID string, log *zap.SugaredLogger) ([]string, error) {
+	resp := make([]string, 0)
+	kubeClient, err := kubeclient.GetKubeClient(config.HubServerAddress(), clusterID)
+	if err != nil {
+		log.Errorf("ListNamespaces clusterID:%s err:%v", clusterID, err)
+		return resp, err
+	}
+	namespaces, err := getter.ListNamespaces(kubeClient)
+	if err != nil {
+		log.Errorf("ListNamespaces err:%v", err)
+		if apierrors.IsForbidden(err) {
+			return resp, err
+		}
+		return resp, err
+	}
+	for _, namespace := range namespaces {
+		resp = append(resp, namespace.Name)
+	}
+	return resp, nil
+}
+
+func ListCustomWorkload(clusterID, namespace string, log *zap.SugaredLogger) ([]string, error) {
+	resp := make([]string, 0)
+	kubeClient, err := kubeclient.GetKubeClient(config.HubServerAddress(), clusterID)
+	if err != nil {
+		log.Errorf("ListCustomWorkload clusterID:%s err:%v", clusterID, err)
+		return resp, err
+	}
+	deployments, err := getter.ListDeployments(namespace, labels.Everything(), kubeClient)
+	if err != nil {
+		log.Errorf("ListDeployments err:%v", err)
+		if apierrors.IsForbidden(err) {
+			return resp, err
+		}
+		return resp, err
+	}
+	for _, deployment := range deployments {
+		for _, container := range deployment.Spec.Template.Spec.Containers {
+			resp = append(resp, strings.Join([]string{setting.Deployment, deployment.Name, container.Name}, "/"))
+		}
+	}
+	statefulsets, err := getter.ListStatefulSets(namespace, labels.Everything(), kubeClient)
+	if err != nil {
+		log.Errorf("ListStatefulSets err:%v", err)
+		if apierrors.IsForbidden(err) {
+			return resp, err
+		}
+		return resp, err
+	}
+	for _, statefulset := range statefulsets {
+		for _, container := range statefulset.Spec.Template.Spec.Containers {
+			resp = append(resp, strings.Join([]string{setting.StatefulSet, statefulset.Name, container.Name}, "/"))
+		}
+	}
+	return resp, nil
 }

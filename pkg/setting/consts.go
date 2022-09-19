@@ -88,9 +88,6 @@ const (
 	// warpdrive
 	WarpDrivePodName    = "WD_POD_NAME"
 	ReleaseImageTimeout = "RELEASE_IMAGE_TIMEOUT"
-	DefaultRegistryAddr = "DEFAULT_REG_ADDRESS"
-	DefaultRegistryAK   = "DEFAULT_REG_ACCESS_KEY"
-	DefaultRegistrySK   = "DEFAULT_REG_SECRET_KEY"
 
 	// reaper
 	Home          = "HOME"
@@ -103,6 +100,9 @@ const (
 
 	// jenkins
 	JenkinsBuildImage = "JENKINS_BUILD_IMAGE"
+
+	// dind
+	DindImage = "DIND_IMAGE"
 
 	DebugMode   = "debug"
 	ReleaseMode = "release"
@@ -118,6 +118,10 @@ const (
 	ENVScopes         = "SCOPES"
 	ENVTokenExpiresAt = "TOKEN_EXPIRES_AT"
 	ENVUserPort       = "USER_PORT"
+
+	// config
+	ENVMysqlDexDB = "MYSQL_DEX_DB"
+	FeatureFlag   = "feature-gates"
 
 	// initconfig
 	ENVAdminEmail    = "ADMIN_EMAIL"
@@ -257,6 +261,7 @@ const (
 	// SourceFromPublicRepo The configuration source is publicRepo
 	SourceFromPublicRepo = "publicRepo"
 	SourceFromChartRepo  = "chartRepo"
+	SourceFromCustomEdit = "customEdit"
 
 	// SourceFromGUI The configuration source is gui
 	SourceFromGUI = "gui"
@@ -391,6 +396,19 @@ const (
 	UpdateProductEvent        = "UpdateProduct"
 	DeleteProductEvent        = "DeleteProduct"
 	UpdateContainerImageEvent = "UpdateContainerImage"
+)
+
+// operation scenes
+const (
+	OperationSceneProject  = "project"
+	OperationSceneBuild    = "build"
+	OperationSceneWorkflow = "workflow"
+	OperationSceneEnv      = "environment"
+	OperationSceneService  = "service"
+	OperationSceneTest     = "test"
+	OperationSceneScanning = "scanning"
+	OperationSceneVersion  = "version"
+	OperationSceneSystem   = "system"
 )
 
 // Service Related
@@ -623,7 +641,13 @@ const (
 	ResetImagePolicyTestFailed         ResetImagePolicyType = "testFailed"
 )
 
-const LocalClusterID = "0123456789abcdef12345678"
+// Cluster Management constants
+const (
+	AgentClusterType      = "agent"
+	KubeConfigClusterType = "kubeconfig"
+
+	LocalClusterID = "0123456789abcdef12345678"
+)
 
 const DefaultLoginLocal = "local"
 
@@ -636,6 +660,7 @@ const UpdateEnvTimeout = 60 * 5 * time.Second
 // list namespace type
 const (
 	ListNamespaceTypeCreate = "create"
+	ListNamespaceTypeALL    = "all"
 )
 
 const (
@@ -658,4 +683,16 @@ const ArtifactResultOut = "artifactResultOut.tar.gz"
 const (
 	DefaultReleaseNaming     = "$Service$"
 	ReleaseNamingPlaceholder = "$Namespace$-$Service$"
+)
+
+// custom workflow constants for variables
+const (
+	FixedValueMark            = "<+fixed>"
+	RenderValueTemplate       = "{{.%s}}"
+	RenderPluginValueTemplate = "$(%s)"
+)
+
+const (
+	// normal project names are not allowed to contain special characters, so we have a special project name to distinguish the enterprise workflow
+	EnterpriseProject = "DEPLOY_CENTER"
 )

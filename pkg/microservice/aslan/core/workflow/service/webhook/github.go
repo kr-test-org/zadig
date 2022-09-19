@@ -512,6 +512,55 @@ func ProcessGithubWebHook(payload []byte, req *http.Request, requestID string, l
 	return nil
 }
 
+func ProcessGithubWebHookForWorkflowV4(payload []byte, req *http.Request, requestID string, log *zap.SugaredLogger) error {
+	forwardedProto := req.Header.Get("X-Forwarded-Proto")
+	forwardedHost := req.Header.Get("X-Forwarded-Host")
+	baseURI := fmt.Sprintf("%s://%s", forwardedProto, forwardedHost)
+
+	hookType := github.WebHookType(req)
+	if hookType == "integration_installation" || hookType == "installation" || hookType == "ping" {
+		return nil
+	}
+
+	err := validateSecret(payload, []byte(gitservice.GetHookSecret()), req)
+	if err != nil {
+		return err
+	}
+
+	event, err := github.ParseWebHook(github.WebHookType(req), payload)
+	if err != nil {
+		return err
+	}
+
+	deliveryID := github.DeliveryID(req)
+	log.Infof("[Webhook] event: %s delivery id: %s received", hookType, deliveryID)
+
+	switch et := event.(type) {
+	case *github.PullRequestEvent:
+		if *et.Action != "opened" && *et.Action != "synchronize" {
+			return nil
+		}
+		err = TriggerWorkflowV4ByGithubEvent(et, baseURI, deliveryID, requestID, log)
+		if err != nil {
+			log.Errorf("prEventToPipelineTasks error: %v", err)
+			return e.ErrGithubWebHook.AddErr(err)
+		}
+	case *github.PushEvent:
+		err = TriggerWorkflowV4ByGithubEvent(et, baseURI, deliveryID, requestID, log)
+		if err != nil {
+			log.Infof("pushEventToPipelineTasks error: %v", err)
+			return e.ErrGithubWebHook.AddErr(err)
+		}
+	case *github.CreateEvent:
+		err = TriggerWorkflowV4ByGithubEvent(et, baseURI, deliveryID, requestID, log)
+		if err != nil {
+			log.Errorf("tagEventToPipelineTasks error: %s", err)
+			return e.ErrGithubWebHook.AddErr(err)
+		}
+	}
+	return nil
+}
+
 type AutoCancelOpt struct {
 	MergeRequestID string
 	CommitID       string
@@ -522,53 +571,7 @@ type AutoCancelOpt struct {
 	IsYaml         bool
 	AutoCancel     bool
 	YamlHookPath   string
-}
-
-func getProductTargetMap(prod *commonmodels.Product, isYaml bool) map[string][]commonmodels.DeployEnv {
-	resp := make(map[string][]commonmodels.DeployEnv)
-	if prod.Source == setting.SourceFromExternal {
-		services, _ := commonrepo.NewServiceColl().ListExternalWorkloadsBy(prod.ProductName, prod.EnvName)
-		for _, service := range services {
-			for _, container := range service.Containers {
-				env := service.ServiceName + "/" + container.Name
-				deployEnv := commonmodels.DeployEnv{Type: setting.K8SDeployType, Env: env}
-				target := strings.Join([]string{service.ProductName, service.ServiceName, container.Name}, SplitSymbol)
-				resp[target] = append(resp[target], deployEnv)
-			}
-		}
-		return resp
-	}
-	if isYaml {
-		return resp
-	}
-	for _, services := range prod.Services {
-		for _, serviceObj := range services {
-			switch serviceObj.Type {
-			case setting.K8SDeployType:
-				for _, container := range serviceObj.Containers {
-					env := serviceObj.ServiceName + "/" + container.Name
-					deployEnv := commonmodels.DeployEnv{Type: setting.K8SDeployType, Env: env}
-
-					target := fmt.Sprintf("%s%s%s%s%s", prod.ProductName, SplitSymbol, serviceObj.ServiceName, SplitSymbol, container.Name)
-
-					resp[target] = append(resp[target], deployEnv)
-				}
-			case setting.PMDeployType:
-				deployEnv := commonmodels.DeployEnv{Type: setting.PMDeployType, Env: serviceObj.ServiceName}
-				target := fmt.Sprintf("%s%s%s%s%s", prod.ProductName, SplitSymbol, serviceObj.ServiceName, SplitSymbol, serviceObj.ServiceName)
-				resp[target] = append(resp[target], deployEnv)
-			case setting.HelmDeployType:
-				for _, container := range serviceObj.Containers {
-					env := serviceObj.ServiceName + "/" + container.Name
-					deployEnv := commonmodels.DeployEnv{Type: setting.HelmDeployType, Env: env}
-
-					target := fmt.Sprintf("%s%s%s%s%s", prod.ProductName, SplitSymbol, serviceObj.ServiceName, SplitSymbol, container.Name)
-					resp[target] = append(resp[target], deployEnv)
-				}
-			}
-		}
-	}
-	return resp
+	WorkflowName   string
 }
 
 func updateServiceTemplateByGithubPush(pushEvent *github.PushEvent, log *zap.SugaredLogger) error {

@@ -17,6 +17,8 @@ limitations under the License.
 package handler
 
 import (
+	"encoding/json"
+
 	"github.com/gin-gonic/gin"
 
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
@@ -36,6 +38,9 @@ func CreateYamlTemplate(c *gin.Context) {
 		return
 	}
 
+	bs, _ := json.Marshal(req)
+	internalhandler.InsertOperationLog(c, ctx.UserName, "", "创建", "模板-YAML", req.Name, string(bs), ctx.Logger)
+
 	ctx.Err = templateservice.CreateYamlTemplate(req, ctx.Logger)
 }
 
@@ -50,7 +55,27 @@ func UpdateYamlTemplate(c *gin.Context) {
 		return
 	}
 
+	bs, _ := json.Marshal(req)
+	internalhandler.InsertOperationLog(c, ctx.UserName, "", "更新", "模板-YAML", req.Name, string(bs), ctx.Logger)
+
 	ctx.Err = templateservice.UpdateYamlTemplate(c.Param("id"), req, ctx.Logger)
+}
+
+func UpdateYamlTemplateVariable(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	req := &template.YamlTemplate{}
+
+	if err := c.ShouldBindJSON(req); err != nil {
+		ctx.Err = err
+		return
+	}
+
+	bs, _ := json.Marshal(req)
+	internalhandler.InsertOperationLog(c, ctx.UserName, "", "更新", "模板-YAML-变量", req.Name, string(bs), ctx.Logger)
+
+	ctx.Err = templateservice.UpdateYamlTemplateVariable(c.Param("id"), req, ctx.Logger)
 }
 
 type listYamlQuery struct {
@@ -97,6 +122,8 @@ func DeleteYamlTemplate(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
+	internalhandler.InsertOperationLog(c, ctx.UserName, "", "删除", "模板-YAML", c.Param("id"), "", ctx.Logger)
+
 	ctx.Err = templateservice.DeleteYamlTemplate(c.Param("id"), ctx.Logger)
 }
 
@@ -111,11 +138,14 @@ func SyncYamlTemplateReference(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
+	internalhandler.InsertOperationLog(c, ctx.UserName, "", "同步", "模板-YAML", c.Param("id"), "", ctx.Logger)
+
 	ctx.Err = templateservice.SyncYamlTemplateReference(ctx.UserName, c.Param("id"), ctx.Logger)
 }
 
 type getYamlTemplateVariablesReq struct {
-	Content string `json:"content"`
+	Content      string `json:"content"`
+	VariableYaml string `json:"variable_yaml"`
 }
 
 func GetYamlTemplateVariables(c *gin.Context) {
@@ -128,5 +158,18 @@ func GetYamlTemplateVariables(c *gin.Context) {
 		return
 	}
 
-	ctx.Resp, ctx.Err = templateservice.GetYamlVariables(req.Content, ctx.Logger)
+	ctx.Resp, ctx.Err = template.GetYamlVariables(req.Content, ctx.Logger)
+}
+
+func ValidateTemplateVariables(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	req := &getYamlTemplateVariablesReq{}
+	if err := c.ShouldBindJSON(req); err != nil {
+		ctx.Err = err
+		return
+	}
+
+	ctx.Err = templateservice.ValidateVariable(req.Content, req.VariableYaml)
 }

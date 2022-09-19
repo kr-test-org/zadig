@@ -319,7 +319,7 @@ DistributeLoop:
 				}
 			}
 			if serviceInfo.WorkloadType == "" {
-				selector := labels.Set{setting.ProductLabel: p.Task.ProductName, setting.ServiceLabel: distribute.DeployServiceName}.AsSelector()
+				selector = labels.Set{setting.ProductLabel: p.Task.ProductName, setting.ServiceLabel: distribute.DeployServiceName}.AsSelector()
 
 				var deployments []*appsv1.Deployment
 				deployments, err = getter.ListDeployments(distribute.DeployNamespace, selector, p.kubeClient)
@@ -705,7 +705,7 @@ DistributeLoop:
 
 			done := make(chan bool)
 			go func(chan bool) {
-				if _, err = helmClient.InstallOrUpgradeChart(ctx, &chartSpec); err != nil {
+				if _, err = helmClient.InstallOrUpgradeChart(ctx, &chartSpec, nil); err != nil {
 					err = errors.WithMessagef(
 						err,
 						"failed to upgrade helm chart %s/%s",

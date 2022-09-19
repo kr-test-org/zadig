@@ -50,6 +50,7 @@ import (
 	e "github.com/koderover/zadig/pkg/tool/errors"
 	"github.com/koderover/zadig/pkg/tool/log"
 	"github.com/koderover/zadig/pkg/types"
+	"github.com/koderover/zadig/pkg/util"
 )
 
 type CustomParseDataArgs struct {
@@ -417,6 +418,11 @@ func DeleteProductTemplate(userName, productName, requestID string, isDelete boo
 		return err
 	}
 
+	if err = commonservice.DeleteWorkflowV4sByProjectName(productName, log); err != nil {
+		log.Errorf("DeleteProductTemplate Delete productName %s workflowV4 err: %s", productName, err)
+		return err
+	}
+
 	if err = commonservice.DeletePipelines(productName, requestID, log); err != nil {
 		log.Errorf("DeleteProductTemplate Delete productName %s pipeline err: %s", productName, err)
 		return err
@@ -428,7 +434,7 @@ func DeleteProductTemplate(userName, productName, requestID string, isDelete boo
 	}
 
 	// Delete freestyle workflow
-	cl := configclient.New(configbase.ConfigServiceAddress())
+	cl := configclient.New(configbase.AslanServiceAddress())
 	if enable, err := cl.CheckFeature(setting.ModernWorkflowType); err == nil && enable {
 		collieClient := collie.New(config.CollieAPIAddress())
 		if err = collieClient.DeleteCIPipelines(productName, log); err != nil {
@@ -491,6 +497,13 @@ func DeleteProductTemplate(userName, productName, requestID string, isDelete boo
 		})
 	}()
 
+	// delete privateKey data
+	go func() {
+		if err = commonrepo.NewPrivateKeyColl().BulkDelete(productName); err != nil {
+			log.Errorf("failed to bulk delete privateKey, error:%s", err)
+		}
+	}()
+
 	return nil
 }
 
@@ -536,6 +549,7 @@ func ForkProduct(username, uid, requestID string, args *template.ForkProject, lo
 						Name:      c.Name,
 						Image:     c.Image,
 						ImagePath: c.ImagePath,
+						ImageName: util.GetImageNameFromContainerInfo(c.ImageName, c.Name),
 					}
 					serviceResp.Containers = append(serviceResp.Containers, container)
 				}

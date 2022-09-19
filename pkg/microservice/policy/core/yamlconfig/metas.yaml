@@ -135,12 +135,14 @@ metas:
             endpoint: /api/aslan/service/services/?*/pm
           - method: GET
             endpoint: /api/aslan/template/yaml
-          - method: GET
-            endpoint: /api/aslan/service/helm/?*/?*/fileContent
+          - method: PUT
+            endpoint: /api/aslan/service/helm/?*/file
       - action: edit_service
         alias: 编辑
         description: ''
         rules:
+          - method: GET
+            endpoint: /api/aslan/template/charts
           - method: POST
             endpoint: /api/aslan/service/helm/?*
           - method: PUT
@@ -167,9 +169,13 @@ metas:
             endpoint: /api/aslan/service/services
           - method: POST
             endpoint: /api/aslan/service/loader/load/?*/?*
+          - method: PUT
+            endpoint: /api/aslan/service/loader/load/?*/?*
           - method: POST
             endpoint: /api/aslan/service/template/load
           - method: POST
+            endpoint: /api/aslan/service/helm/services
+          - method: PUT
             endpoint: /api/aslan/service/helm/services
           - method: POST
             endpoint: /api/aslan/service/helm/services/bulk
@@ -374,6 +380,8 @@ metas:
           - method: PUT
             endpoint: /api/aslan/template/yaml/?*
           - method: PUT
+            endpoint: /api/aslan/template/yaml/?*/variable
+          - method: PUT
             endpoint: /api/aslan/template/charts/?*
           - method: POST
             endpoint: api/aslan/template/charts/?*/reference
@@ -385,6 +393,8 @@ metas:
             endpoint: /api/aslan/template/dockerfile/?*
           - method: PUT
             endpoint: /api/aslan/template/build/?*
+          - method: POST
+            endpoint: /api/aslan/template/yaml/validateVariable
       - action: delete_template
         alias: 删除
         description: 删除
@@ -460,6 +470,25 @@ metas:
             endpoint: /api/aslan/workflow/v3/?*/args
           - method: GET
             endpoint: /api/aslan/workflow/servicetask/workflows/?*/?*/?*/?*
+          - method: GET
+            endpoint: api/aslan/workflow/v4
+            filter: true
+          - method: GET
+            endpoint: api/aslan/workflow/v4
+          - method: GET
+            endpoint: /api/aslan/workflow/v4/name/?*
+          - method: GET
+            endpoint: /api/aslan/workflow/v4/preset/?*
+          - method: GET
+            endpoint: /api/aslan/workflow/v4/workflowtask
+          - method: GET
+            endpoint: /api/aslan/workflow/v4/workflowtask/workflow/?*/task/?*
+          - method: GET
+            endpoint: /api/aslan/workflow/v4/workflowtask/clone/workflow/?*/task/?*
+          - method: GET
+            endpoint: /api/aslan/workflow/v4/webhook/preset
+          - method: GET
+            endpoint: /api/aslan/workflow/v4/webhook
       - action: edit_workflow
         alias: 编辑
         description: ''
@@ -476,6 +505,16 @@ metas:
             endpoint: /api/aslan/workflow/v3/?*
           - method: GET
             endpoint: /api/aslan/build/build/serviceModule
+          - method: PUT
+            endpoint: /api/aslan/workflow/v4/?*
+          - method: POST
+            endpoint: /api/aslan/workflow/v4/lint
+          - method: POST
+            endpoint: /api/aslan/workflow/v4/webhook/?*
+          - method: PUT
+            endpoint: /api/aslan/workflow/v4/webhook/?*
+          - method: DELETE
+            endpoint: /api/aslan/workflow/v4/webhook/?*/trigger/?*
       - action: create_workflow
         alias: 新建
         description: ''
@@ -496,6 +535,10 @@ metas:
             endpoint: /api/aslan/testing/testdetail
           - method: POST
             endpoint: /api/aslan/workflow/v3
+          - method: POST
+            endpoint: /api/aslan/workflow/v4
+          - method: POST
+            endpoint: /api/aslan/workflow/v4/lint
       - action: delete_workflow
         alias: 删除
         description: ''
@@ -504,6 +547,8 @@ metas:
             endpoint: /api/aslan/workflow/workflow/?*
           - method: DELETE
             endpoint: /api/aslan/workflow/v3/?*
+          - method: DELETE
+            endpoint: /api/aslan/workflow/v4/?*
       - action: run_workflow
         alias: 执行
         description: ''
@@ -534,6 +579,12 @@ metas:
             endpoint: /api/aslan/workflow/v3/workflowtask/id/?*/name/?*/restart
           - method: DELETE
             endpoint: /api/aslan/workflow/v3/workflowtask/id/?*/name/?*
+          - method: POST
+            endpoint: /api/aslan/workflow/v4/workflowtask
+          - method: DELETE
+            endpoint: /api/aslan/workflow/v4/workflowtask/workflow/?*/task/?*
+          - method: POST
+            endpoint: /api/aslan/workflow/v4/workflowtask/approve
   - resource: Environment
     alias: 环境
     description: ''
@@ -640,6 +691,8 @@ metas:
             endpoint: /api/aslan/service/workloads
           - method: GET
             endpoint: /api/aslan/project/products/?*/services
+          - method: GET
+            endpoint: /api/aslan/environment/operations
           - method: PUT
             endpoint: '/api/aslan/environment/environments/:name/registry'
           - method: PUT
@@ -688,6 +741,10 @@ metas:
         rules:
           - method: GET
             endpoint: '/api/podexec/?*/?*/?*/?*/podExec/:name'
+          - method: POST
+            endpoint: '/api/aslan/environment/kube/:name/pods/?*/debugcontainer'
+          - method: GET
+            endpoint: '/api/aslan/environment/kube/pods/?*/file'
       - action: ssh_pm
         alias: 主机登录
         description: ''

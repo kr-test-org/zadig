@@ -48,6 +48,8 @@ func (*Router) Inject(router *gin.RouterGroup) {
 
 		users.POST("/users/ldap/:ldapId", user.SyncLdapUser)
 
+		users.GET("/user/count", user.CountSystemUsers)
+
 		router.GET("login", login.Login)
 
 		router.GET("login-enabled", login.ThirdPartyLoginEnabled)
@@ -59,7 +61,5 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		router.GET("retrieve", user.Retrieve)
 
 		router.POST("reset", user.Reset)
-
-		router.GET("/healthz", Healthz)
 	}
 }

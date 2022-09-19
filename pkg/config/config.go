@@ -142,15 +142,6 @@ func CollieServiceAddress() string {
 	return GetServiceAddress(s.Name, s.Port)
 }
 
-func ConfigServiceInfo() *setting.ServiceInfo {
-	return GetServiceByCode(setting.Config)
-}
-
-func ConfigServiceAddress() string {
-	s := ConfigServiceInfo()
-	return GetServiceAddress(s.Name, s.Port)
-}
-
 func WarpDriveServiceInfo() *setting.ServiceInfo {
 	return GetServiceByCode(setting.WarpDrive)
 }
@@ -168,21 +159,12 @@ func OPAServiceAddress() string {
 	return GetServiceAddress(s.Name, s.Port)
 }
 
-func PolicyServiceInfo() *setting.ServiceInfo {
-	return GetServiceByCode(setting.Policy)
+func VendorServiceInfo() *setting.ServiceInfo {
+	return GetServiceByCode(setting.Vendor)
 }
 
-func PolicyServiceAddress() string {
-	s := PolicyServiceInfo()
-	return GetServiceAddress(s.Name, s.Port)
-}
-
-func UserServiceInfo() *setting.ServiceInfo {
-	return GetServiceByCode(setting.User)
-}
-
-func UserServiceAddress() string {
-	s := UserServiceInfo()
+func VendorServiceAddress() string {
+	s := VendorServiceInfo()
 	return GetServiceAddress(s.Name, s.Port)
 }
 
@@ -200,6 +182,9 @@ func MinioServiceName() string {
 
 func DataPath() string {
 	return "/app/data"
+}
+func WorkflowDataPath() string {
+	return "/workflow/data"
 }
 
 func ObjectStorageServicePath(project, service string) string {
@@ -222,6 +207,10 @@ func LocalServicePath(project, service string) string {
 	return filepath.Join(DataPath(), project, service)
 }
 
+func LocalWorkflowServicePath(project, service string) string {
+	return filepath.Join(WorkflowDataPath(), project, service)
+}
+
 func LocalServicePathWithRevision(project, service, revision string) string {
 	return filepath.Join(DataPath(), project, service, revision)
 }
@@ -240,6 +229,10 @@ func MongoURI() string {
 
 func MongoDatabase() string {
 	return viper.GetString(setting.ENVAslanDBName)
+}
+
+func PolicyDatabase() string {
+	return MongoDatabase() + "_policy"
 }
 
 func MysqlUser() string {

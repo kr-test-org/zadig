@@ -66,6 +66,10 @@ func GetKubeWorkloads(namespace, clusterID string, log *zap.SugaredLogger) (*Get
 		log.Errorf("cluster is not connected [%s] err:%s", clusterID, err)
 		return nil, err
 	}
+	cliSet, err := kubeclient.GetKubeClientSet(config.HubServerAddress(), clusterID)
+	if err != nil {
+		return nil, err
+	}
 
 	deployments, err := getter.ListDeployments(namespace, nil, kubeClient)
 	if err != nil {
@@ -98,11 +102,18 @@ func GetKubeWorkloads(namespace, clusterID string, log *zap.SugaredLogger) (*Get
 		serviceNames = append(serviceNames, service.Name)
 	}
 	workloadsMap["service"] = serviceNames
-	ingresses, err := getter.ListIngresses(namespace, kubeClient, true)
+
+	version, err := cliSet.Discovery().ServerVersion()
+	if err != nil {
+		log.Errorf("Failed to get server version info for cluster: %s, the error is: %s", cliSet, err)
+		return nil, err
+	}
+	ingresses, err := getter.ListIngresses(namespace, kubeClient, kubeclient.VersionLessThan122(version))
 	if err != nil {
 		log.Errorf("GetKubeWorkloads ListIngresses error, error msg:%s", err)
 		return nil, err
 	}
+
 	var ingressNames []string
 	for _, ingress := range ingresses.Items {
 		ingressNames = append(ingressNames, ingress.GetName())
@@ -166,11 +177,15 @@ type GetKubeWorkloadsYamlResp struct {
 	Services []ServiceYaml `json:"services"`
 }
 
-func LoadKubeWorkloadsYaml(username string, params *LoadKubeWorkloadsYamlReq, log *zap.SugaredLogger) error {
+func LoadKubeWorkloadsYaml(username string, params *LoadKubeWorkloadsYamlReq, force bool, log *zap.SugaredLogger) error {
 	kubeClient, err := kubeclient.GetKubeClient(config.HubServerAddress(), params.ClusterID)
 	if err != nil {
 		log.Errorf("cluster is not connected [%s]", params.ClusterID)
-		return err
+		return e.ErrGetService.AddErr(err)
+	}
+	cliSet, err := kubeclient.GetKubeClientSet(config.HubServerAddress(), params.ClusterID)
+	if err != nil {
+		return e.ErrGetService.AddErr(err)
 	}
 	for _, service := range params.Services {
 		var yamls []string
@@ -217,13 +232,17 @@ func LoadKubeWorkloadsYaml(username string, params *LoadKubeWorkloadsYamlReq, lo
 					yamls = append(yamls, string(bs))
 				}
 			case "ingress":
+				version, err := cliSet.Discovery().ServerVersion()
+				if err != nil {
+					log.Errorf("Failed to get server version info for cluster: %s, the error is: %s", cliSet, err)
+					return e.ErrGetService.AddErr(err)
+				}
 				for _, workload := range workloads {
-					bs, _, err := getter.GetIngressYamlFormat(params.Namespace, workload, kubeClient)
+					bs, _, err := getter.GetIngressYaml(params.Namespace, workload, kubeClient, kubeclient.VersionLessThan122(version))
 					if len(bs) == 0 || err != nil {
 						log.Errorf("not found yaml %v", err)
 						return e.ErrGetService.AddDesc(fmt.Sprintf("get deploy/ingress failed err:%s", err))
 					}
-
 					yamls = append(yamls, string(bs))
 				}
 			case "statefulset":
@@ -257,7 +276,7 @@ func LoadKubeWorkloadsYaml(username string, params *LoadKubeWorkloadsYamlReq, lo
 			Yaml:        yaml,
 			Source:      "spock",
 		}
-		_, err := CreateServiceTemplate(username, serviceParam, log)
+		_, err := CreateServiceTemplate(username, serviceParam, force, log)
 		if err != nil {
 			log.Errorf("CreateServiceTemplate error, msg:%s", err)
 			return err

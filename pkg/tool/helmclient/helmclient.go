@@ -534,7 +534,7 @@ func (hClient *HelmClient) upgradeChart(ctx context.Context, spec *hc.ChartSpec)
 }
 
 // InstallOrUpgradeChart install or upgrade helm chart, use the same rule with helm to determine weather to install or upgrade
-func (hClient *HelmClient) InstallOrUpgradeChart(ctx context.Context, spec *hc.ChartSpec) (*release.Release, error) {
+func (hClient *HelmClient) InstallOrUpgradeChart(ctx context.Context, spec *hc.ChartSpec, opts *hc.GenericHelmOptions) (*release.Release, error) {
 	install, err := hClient.isInstallOperation(spec)
 	if err != nil {
 		return nil, err
@@ -626,12 +626,12 @@ func (hClient *HelmClient) pushAcrChart(repoEntry *repo.Entry, chartPath string)
 	prog.Env = os.Environ()
 	buf := bytes.NewBuffer(nil)
 	prog.Stdout = buf
-	prog.Stderr = os.Stderr
+	prog.Stderr = buf
 	if err := prog.Run(); err != nil {
 		if eErr, ok := err.(*exec.ExitError); ok {
-			return fmt.Errorf("plugin exited with error: %s", string(eErr.Stderr))
+			return fmt.Errorf("plugin exited with error: %s %s", string(eErr.Stderr), buf.String())
 		}
-		return err
+		return fmt.Errorf("%s %s", err, buf.String())
 	}
 	return nil
 }

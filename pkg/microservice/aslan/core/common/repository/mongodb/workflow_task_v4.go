@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
@@ -31,7 +32,12 @@ import (
 )
 
 type ListWorkflowTaskV4Option struct {
-	WorkflowName string
+	WorkflowName    string
+	WorkflowNames   []string
+	CreateTime      int64
+	BeforeCreatTime bool
+	Limit           int
+	Skip            int
 }
 
 type WorkflowTaskv4Coll struct {
@@ -67,6 +73,7 @@ func (c *WorkflowTaskv4Coll) EnsureIndex(ctx context.Context) error {
 		{
 			Keys: bson.D{
 				bson.E{Key: "workflow_name", Value: 1},
+				bson.E{Key: "is_archived", Value: 1},
 				bson.E{Key: "is_deleted", Value: 1},
 			},
 			Options: options.Index().SetUnique(false),
@@ -94,24 +101,34 @@ func (c *WorkflowTaskv4Coll) Create(obj *models.WorkflowTask) (string, error) {
 	return ID.Hex(), err
 }
 
-func (c *WorkflowTaskv4Coll) List(opt *ListWorkflowTaskV4Option, pageNum, pageSize int64) ([]*models.WorkflowTask, int64, error) {
+func (c *WorkflowTaskv4Coll) List(opt *ListWorkflowTaskV4Option) ([]*models.WorkflowTask, int64, error) {
 	resp := make([]*models.WorkflowTask, 0)
 	query := bson.M{}
 	if opt.WorkflowName != "" {
 		query["workflow_name"] = opt.WorkflowName
 	}
+	if opt.WorkflowNames != nil {
+		query["workflow_name"] = bson.M{"$in": opt.WorkflowNames}
+	}
+	query["is_archived"] = false
+	query["is_deleted"] = false
+	if opt.CreateTime > 0 {
+		comparison := "$gte"
+		if opt.BeforeCreatTime {
+			comparison = "$lte"
+		}
+		query["create_time"] = bson.M{comparison: opt.CreateTime}
+	}
 	count, err := c.CountDocuments(context.TODO(), query)
 	if err != nil {
 		return nil, 0, err
 	}
-	var findOption *options.FindOptions
-	if pageNum == 0 && pageSize == 0 {
-		findOption = options.Find()
-	} else {
-		findOption = options.Find().
-			SetSort(bson.D{{"create_time", -1}}).
-			SetSkip((pageNum - 1) * pageSize).
-			SetLimit(pageSize)
+
+	findOption := options.Find()
+	if opt.Limit > 0 {
+		findOption.SetSort(bson.D{{"create_time", -1}})
+		findOption.SetSkip(int64(opt.Skip))
+		findOption.SetLimit(int64(opt.Limit))
 	}
 
 	cursor, err := c.Collection.Find(context.TODO(), query, findOption)
@@ -123,6 +140,25 @@ func (c *WorkflowTaskv4Coll) List(opt *ListWorkflowTaskV4Option, pageNum, pageSi
 		return nil, 0, err
 	}
 	return resp, count, nil
+}
+
+func (c *WorkflowTaskv4Coll) FindTodoTasksByWorkflowName(workflowName string) ([]*models.WorkflowTask, error) {
+	ret := make([]*models.WorkflowTask, 0)
+	query := bson.M{"status": bson.M{"$in": []string{"waiting", "queued", "created", "running", "blocked"}}}
+	query["workflow_name"] = workflowName
+	query["is_deleted"] = false
+	query["is_archived"] = false
+
+	opt := options.Find()
+	opt.SetSort(bson.D{{"create_time", 1}})
+
+	cursor, err := c.Collection.Find(context.TODO(), query, opt)
+	if err != nil {
+		return nil, err
+	}
+	err = cursor.All(context.TODO(), &ret)
+
+	return ret, err
 }
 
 func (c *WorkflowTaskv4Coll) InCompletedTasks() ([]*models.WorkflowTask, error) {
@@ -196,13 +232,21 @@ func (c *WorkflowTaskv4Coll) DeleteByWorkflowName(workflowName string) error {
 	return err
 }
 
-func (c *WorkflowTaskv4Coll) ArchiveHistoryWorkflowTask(workflowName string, remain int) error {
+func (c *WorkflowTaskv4Coll) ArchiveHistoryWorkflowTask(workflowName string, remain, remainDays int) error {
+	if remain == 0 && remainDays == 0 {
+		return nil
+	}
 	query := bson.M{"workflow_name": workflowName, "is_deleted": false}
 	count, err := c.CountDocuments(context.TODO(), query)
 	if err != nil {
 		return err
 	}
-	query["task_id"] = bson.M{"$lt": int(count) - remain + 1}
+	if remain > 0 {
+		query["task_id"] = bson.M{"$lt": int(count) - remain + 1}
+	}
+	if remainDays > 0 {
+		query["create_time"] = bson.M{"$lt": time.Now().AddDate(0, 0, -remainDays).Unix()}
+	}
 	change := bson.M{"$set": bson.M{
 		"is_archived": true,
 	}}

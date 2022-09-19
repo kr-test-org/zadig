@@ -52,7 +52,7 @@ func GetProductTemplate(productName string, log *zap.SugaredLogger) (*template.P
 	}
 
 	totalFreeStyles := make([]*collie.CiPipelineResource, 0)
-	cl := configclient.New(configbase.ConfigServiceAddress())
+	cl := configclient.New(configbase.AslanServiceAddress())
 	if enable, err := cl.CheckFeature(setting.ModernWorkflowType); err == nil && enable {
 		// CI场景onboarding流程处于第二步时，需要返回ci工作流id，用于前端跳转
 		collieAPIAddress := config.CollieAPIAddress()
@@ -188,7 +188,7 @@ func FillProductTemplateVars(productTemplates []*template.Product, log *zap.Suga
 				<-ch
 				wg.Done()
 			}()
-			renderSet, err := GetRenderSet(tmpl.ProductName, 0, log)
+			renderSet, err := GetRenderSet(tmpl.ProductName, 0, true, "", log)
 			if err != nil {
 				errStr += fmt.Sprintf("Failed to find render set for product template, productName:%s, err:%v\n", tmpl.ProductName, err)
 				log.Errorf("Failed to find render set for product template %s", tmpl.ProductName)

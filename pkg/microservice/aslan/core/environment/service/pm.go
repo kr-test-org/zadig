@@ -264,14 +264,5 @@ func (p *PMService) createGroup(envName, productName, username string, group []*
 			errList = multierror.Append(errList, err)
 		}
 	}
-	// 如果创建依赖服务组有返回错误, 停止等待
-	if err := errList.ErrorOrNil(); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (p *PMService) initEnvConfigSet(envName, productName, username string, envConfigYamls []string, inf informers.SharedInformerFactory, kubeClient client.Client) error {
-	return nil
+	return errList.ErrorOrNil()
 }

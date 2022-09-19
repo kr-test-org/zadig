@@ -67,7 +67,7 @@ func TriggerScanningByGitlabEvent(event interface{}, baseURI, requestID string, 
 						if notification == nil {
 							mainRepo := ConvertScanningHookToMainHookRepo(item)
 							notification, _ = scmnotify.NewService().SendInitWebhookComment(
-								mainRepo, ev.ObjectAttributes.IID, baseURI, false, false, true, log,
+								mainRepo, ev.ObjectAttributes.IID, baseURI, false, false, true, false, log,
 							)
 						}
 					}
@@ -149,6 +149,9 @@ func (gpem *gitlabPushEventMatcherForScanning) Match(hookRepo *types.ScanningHoo
 		matchRepo := ConvertScanningHookToMainHookRepo(hookRepo)
 
 		if !EventConfigured(matchRepo, config.HookEventPush) {
+			return false, nil
+		}
+		if hookRepo.Branch != getBranchFromRef(ev.Ref) {
 			return false, nil
 		}
 

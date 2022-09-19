@@ -27,6 +27,7 @@ import (
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	logservice "github.com/koderover/zadig/pkg/microservice/aslan/core/log/service"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/testing/service"
+	"github.com/koderover/zadig/pkg/setting"
 	internalhandler "github.com/koderover/zadig/pkg/shared/handler"
 	e "github.com/koderover/zadig/pkg/tool/errors"
 	"github.com/koderover/zadig/pkg/util/ginzap"
@@ -125,15 +126,16 @@ func GetWorkflowBuildJobContainerLogsSSE(c *gin.Context) {
 
 	subTask := c.Query("subTask")
 	options := &logservice.GetContainerOptions{
-		Namespace:    config.Namespace(),
-		PipelineName: c.Param("pipelineName"),
-		SubTask:      subTask,
-		TailLines:    tails,
-		TaskID:       taskID,
-		ServiceName:  c.Param("serviceName"),
-		PipelineType: string(config.WorkflowType),
-		EnvName:      c.Query("envName"),
-		ProductName:  c.Query("projectName"),
+		Namespace:     config.Namespace(),
+		PipelineName:  c.Param("pipelineName"),
+		SubTask:       subTask,
+		TailLines:     tails,
+		TaskID:        taskID,
+		ServiceName:   c.Param("serviceName"),
+		ServiceModule: c.Query("serviceModule"),
+		PipelineType:  string(config.WorkflowType),
+		EnvName:       c.Query("envName"),
+		ProductName:   c.Query("projectName"),
 	}
 
 	internalhandler.Stream(c, func(ctx1 context.Context, streamChan chan interface{}) {
@@ -310,15 +312,26 @@ func GetScanningContainerLogsSSE(c *gin.Context) {
 	}
 
 	resp, err := service.GetScanningModuleByID(id, ctx.Logger)
+
+	clusterId := ""
+	namespace := config.Namespace()
+	if resp.AdvancedSetting != nil {
+		clusterId = resp.AdvancedSetting.ClusterID
+	}
+	if clusterId != "" && clusterId != setting.LocalClusterID {
+		namespace = setting.AttachedClusterNamespace
+	}
+
 	scanningName := fmt.Sprintf("%s-%s-%s", resp.Name, id, "scanning-job")
 	options := &logservice.GetContainerOptions{
-		Namespace:    config.Namespace(),
+		Namespace:    namespace,
 		PipelineName: scanningName,
 		SubTask:      string(config.TaskScanning),
 		TailLines:    tails,
 		TaskID:       taskID,
 		PipelineType: string(config.ScanningType),
 		ServiceName:  resp.Name,
+		ClusterID:    clusterId,
 	}
 
 	internalhandler.Stream(c, func(ctx1 context.Context, streamChan chan interface{}) {

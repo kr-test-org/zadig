@@ -21,10 +21,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
+
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
+	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/environment/service"
+	"github.com/koderover/zadig/pkg/setting"
 	internalhandler "github.com/koderover/zadig/pkg/shared/handler"
 	e "github.com/koderover/zadig/pkg/tool/errors"
 	"github.com/koderover/zadig/pkg/tool/log"
@@ -42,7 +46,7 @@ func DeleteCommonEnvCfg(c *gin.Context) {
 		ctx.Err = e.ErrInvalidParam.AddDesc("param envName or projectName or objectName is invalid")
 		return
 	}
-	internalhandler.InsertOperationLog(c, ctx.UserName, productName, "删除", "环境-对象", fmt.Sprintf("环境名称:%s,%s名称:%s", envName, commonEnvCfgType, objectName), "", ctx.Logger)
+	internalhandler.InsertDetailedOperationLog(c, ctx.UserName, productName, setting.OperationSceneEnv, "删除", "环境配置", fmt.Sprintf("%s:%s:%s", envName, commonEnvCfgType, objectName), "", ctx.Logger, envName)
 
 	ctx.Err = service.DeleteCommonEnvCfg(envName, productName, objectName, config.CommonEnvCfgType(commonEnvCfgType), ctx.Logger)
 }
@@ -51,7 +55,7 @@ func CreateCommonEnvCfg(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
-	args := new(service.CreateCommonEnvCfgArgs)
+	args := new(models.CreateUpdateCommonEnvCfgArgs)
 	data, err := c.GetRawData()
 	if err != nil {
 		log.Errorf("CreateCommonEnvCfg c.GetRawData() err : %v", err)
@@ -63,7 +67,7 @@ func CreateCommonEnvCfg(c *gin.Context) {
 		ctx.Err = e.ErrInvalidParam.AddDesc(err.Error())
 		return
 	}
-	internalhandler.InsertOperationLog(c, ctx.UserName, args.ProductName, "新建", "环境-对象", fmt.Sprintf("环境名称:%s,%s:", args.EnvName, args.CommonEnvCfgType), string(data), ctx.Logger)
+	internalhandler.InsertDetailedOperationLog(c, ctx.UserName, c.Query("projectName"), setting.OperationSceneEnv, "新建", "环境配置", fmt.Sprintf("%s:%s", args.EnvName, args.CommonEnvCfgType), string(data), ctx.Logger, c.Param("envName"))
 	c.Request.Body = ioutil.NopCloser(bytes.NewBuffer(data))
 
 	if err := c.BindJSON(args); err != nil {
@@ -76,14 +80,14 @@ func CreateCommonEnvCfg(c *gin.Context) {
 	}
 	args.EnvName = c.Param("envName")
 	args.ProductName = c.Query("projectName")
-	ctx.Err = service.CreateCommonEnvCfg(args, ctx.UserName, ctx.UserID, ctx.Logger)
+	ctx.Err = service.CreateCommonEnvCfg(args, ctx.UserName, ctx.Logger)
 }
 
 func UpdateCommonEnvCfg(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
-	args := new(service.UpdateCommonEnvCfgArgs)
+	args := new(models.CreateUpdateCommonEnvCfgArgs)
 	data, err := c.GetRawData()
 	if err != nil {
 		log.Errorf("UpdateCommonEnvCfg c.GetRawData() err : %v", err)
@@ -91,7 +95,7 @@ func UpdateCommonEnvCfg(c *gin.Context) {
 	if err = json.Unmarshal(data, args); err != nil {
 		log.Errorf("UpdateCommonEnvCfg json.Unmarshal err : %v", err)
 	}
-	internalhandler.InsertOperationLog(c, ctx.UserName, args.ProductName, "更新", fmt.Sprintf("环境-%s", args.CommonEnvCfgType), fmt.Sprintf("环境名称:%s,%s名称:%s", args.EnvName, args.CommonEnvCfgType, args.Name), string(data), ctx.Logger)
+	internalhandler.InsertDetailedOperationLog(c, ctx.UserName, c.Query("projectName"), setting.OperationSceneEnv, "更新", "环境配置", fmt.Sprintf("%s:%s:%s", args.EnvName, args.CommonEnvCfgType, args.Name), string(data), ctx.Logger, c.Param("envName"))
 	c.Request.Body = ioutil.NopCloser(bytes.NewBuffer(data))
 
 	if err := c.BindJSON(args); err != nil {
@@ -99,13 +103,21 @@ func UpdateCommonEnvCfg(c *gin.Context) {
 		return
 	}
 	if len(args.YamlData) == 0 {
-		ctx.Err = e.ErrInvalidParam
+		ctx.Err = e.ErrInvalidParam.AddDesc("yaml info can't be nil")
 		return
 	}
 	args.EnvName = c.Param("envName")
 	args.ProductName = c.Query("projectName")
+	isRollBack := false
+	if len(c.Query("rollback")) > 0 {
+		isRollBack, err = strconv.ParseBool(c.Query("rollback"))
+		if err != nil {
+			ctx.Err = e.ErrInvalidParam.AddErr(err)
+			return
+		}
+	}
 
-	ctx.Err = service.UpdateCommonEnvCfg(args, ctx.UserName, ctx.UserID, ctx.Logger)
+	ctx.Err = service.UpdateCommonEnvCfg(args, ctx.UserName, isRollBack, ctx.Logger)
 }
 
 func ListCommonEnvCfgHistory(c *gin.Context) {
@@ -114,9 +126,34 @@ func ListCommonEnvCfgHistory(c *gin.Context) {
 
 	args := new(service.ListCommonEnvCfgHistoryArgs)
 	args.EnvName = c.Param("envName")
-	args.ProductName = c.Query("projectName")
+	args.ProjectName = c.Query("projectName")
 	args.CommonEnvCfgType = config.CommonEnvCfgType(c.Query("commonEnvCfgType"))
 	args.Name = c.Param("objectName")
 
-	ctx.Resp, ctx.Err = service.ListCommonEnvCfgHistory(args, ctx.Logger)
+	ctx.Resp, ctx.Err = service.ListEnvResourceHistory(args, ctx.Logger)
+}
+
+func ListLatestEnvCfg(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	args := new(service.ListCommonEnvCfgHistoryArgs)
+	if err := c.ShouldBindQuery(args); err != nil {
+		ctx.Err = e.ErrInvalidParam.AddErr(err)
+		return
+	}
+	ctx.Resp, ctx.Err = service.ListLatestEnvResources(args, ctx.Logger)
+}
+
+func SyncEnvResource(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	args := &service.SyncEnvResourceArg{
+		EnvName:     c.Param("envName"),
+		ProductName: c.Query("projectName"),
+		Name:        c.Param("objectName"),
+		Type:        c.Param("type"),
+	}
+	ctx.Err = service.SyncEnvResource(args, ctx.Logger)
 }

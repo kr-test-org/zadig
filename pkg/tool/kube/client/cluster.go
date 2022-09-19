@@ -107,6 +107,15 @@ func NewClientFromAPIConfig(cfg *api.Config) (client.Client, error) {
 	return newAPIClient(cls.GetClient(), cls.GetAPIReader()), nil
 }
 
+func GetKubeClientFromRestConfig(cfg *rest.Config) (client.Client, error) {
+	cls, err := initCluster(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return newAPIClient(cls.GetClient(), cls.GetAPIReader()), nil
+}
+
 func NewAPIClient(c client.Client, r client.Reader) client.Client {
 	return newAPIClient(c, r)
 }
@@ -122,8 +131,8 @@ func newAPIClient(c client.Client, r client.Reader) client.Client {
 	return &apiClient{Client: c, apiReader: r}
 }
 
-func (c *apiClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object) error {
-	return c.apiReader.Get(ctx, key, obj)
+func (c *apiClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	return c.apiReader.Get(ctx, key, obj, opts...)
 }
 
 func (c *apiClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {

@@ -20,10 +20,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/koderover/zadig/pkg/setting"
+	"github.com/koderover/zadig/pkg/tool/log"
 	"github.com/koderover/zadig/pkg/tool/s3"
 	"github.com/koderover/zadig/pkg/types/step"
 	"gopkg.in/yaml.v3"
@@ -49,53 +52,65 @@ func NewArchiveStep(spec interface{}, workspace string, envs, secretEnvs []strin
 }
 
 func (s *ArchiveStep) Run(ctx context.Context) error {
-	if s.spec.DestinationPath == "" || s.spec.FilePath == "" {
-		return nil
-	}
-	forcedPathStyle := true
-	if s.spec.S3.Provider == setting.ProviderSourceAli {
-		forcedPathStyle = false
-	}
-	client, err := s3.NewClient(s.spec.S3.Endpoint, s.spec.S3.Ak, s.spec.S3.Sk, s.spec.S3.Insecure, forcedPathStyle)
-	if err != nil {
-		return fmt.Errorf("failed to create s3 client to upload file, err: %s", err)
-	}
+	start := time.Now()
+	defer func() {
+		log.Infof("Archive ended. Duration: %.2f seconds", time.Since(start).Seconds())
+	}()
 
-	envmaps := make(map[string]string)
-	for _, env := range s.envs {
-		kv := strings.Split(env, "=")
-		if len(kv) != 2 {
-			continue
+	for _, upload := range s.spec.UploadDetail {
+		log.Infof("Start archive %s.", upload.FilePath)
+		if upload.DestinationPath == "" || upload.FilePath == "" {
+			return nil
 		}
-		envmaps[kv[0]] = kv[1]
-	}
-	for _, secretEnv := range s.secretEnvs {
-		kv := strings.Split(secretEnv, "=")
-		if len(kv) != 2 {
-			continue
+		forcedPathStyle := true
+		if s.spec.S3.Provider == setting.ProviderSourceAli {
+			forcedPathStyle = false
 		}
-		envmaps[kv[0]] = kv[1]
-	}
-
-	s.spec.AbsFilePath = fmt.Sprintf("$WORKSPACE/%s", s.spec.FilePath)
-	s.spec.AbsFilePath = replaceEnvWithValue(s.spec.AbsFilePath, envmaps)
-	s.spec.DestinationPath = replaceEnvWithValue(s.spec.DestinationPath, envmaps)
-
-	info, err := os.Stat(s.spec.AbsFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to upload file path [%s] to destination [%s], the error is: %s", s.spec.AbsFilePath, s.spec.DestinationPath, err)
-	}
-	// if the given path is a directory
-	if info.IsDir() {
-		err := client.UploadDir(s.spec.S3.Bucket, s.spec.AbsFilePath, s.spec.DestinationPath)
+		client, err := s3.NewClient(s.spec.S3.Endpoint, s.spec.S3.Ak, s.spec.S3.Sk, s.spec.S3.Insecure, forcedPathStyle)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to create s3 client to upload file, err: %s", err)
 		}
-	} else {
-		key := filepath.Join(s.spec.DestinationPath, info.Name())
-		err := client.Upload(s.spec.S3.Bucket, s.spec.AbsFilePath, key)
+
+		envmaps := make(map[string]string)
+		for _, env := range s.envs {
+			kv := strings.Split(env, "=")
+			if len(kv) != 2 {
+				continue
+			}
+			envmaps[kv[0]] = kv[1]
+		}
+		for _, secretEnv := range s.secretEnvs {
+			kv := strings.Split(secretEnv, "=")
+			if len(kv) != 2 {
+				continue
+			}
+			envmaps[kv[0]] = kv[1]
+		}
+
+		upload.AbsFilePath = fmt.Sprintf("$WORKSPACE/%s", upload.FilePath)
+		upload.AbsFilePath = replaceEnvWithValue(upload.AbsFilePath, envmaps)
+		upload.DestinationPath = replaceEnvWithValue(upload.DestinationPath, envmaps)
+
+		if len(s.spec.S3.Subfolder) > 0 {
+			upload.DestinationPath = strings.TrimLeft(path.Join(s.spec.S3.Subfolder, upload.DestinationPath), "/")
+		}
+
+		info, err := os.Stat(upload.AbsFilePath)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to upload file path [%s] to destination [%s], the error is: %s", upload.AbsFilePath, upload.DestinationPath, err)
+		}
+		// if the given path is a directory
+		if info.IsDir() {
+			err := client.UploadDir(s.spec.S3.Bucket, upload.AbsFilePath, upload.DestinationPath)
+			if err != nil {
+				return err
+			}
+		} else {
+			key := filepath.Join(upload.DestinationPath, info.Name())
+			err := client.Upload(s.spec.S3.Bucket, upload.AbsFilePath, key)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil

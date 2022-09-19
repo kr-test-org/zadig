@@ -17,6 +17,9 @@ limitations under the License.
 package handler
 
 import (
+	"encoding/json"
+	"fmt"
+
 	"github.com/gin-gonic/gin"
 
 	svcservice "github.com/koderover/zadig/pkg/microservice/aslan/core/service/service"
@@ -34,7 +37,10 @@ func LoadServiceFromYamlTemplate(c *gin.Context) {
 		return
 	}
 
-	ctx.Err = svcservice.LoadServiceFromYamlTemplate(ctx.UserName, req, ctx.Logger)
+	bs, _ := json.Marshal(req)
+	internalhandler.InsertOperationLog(c, ctx.UserName, req.ProjectName, "新增", "项目管理-服务", fmt.Sprintf("服务名称:%s", req.ServiceName), string(bs), ctx.Logger)
+
+	ctx.Err = svcservice.LoadServiceFromYamlTemplate(ctx.UserName, req, false, ctx.Logger)
 }
 
 func ReloadServiceFromYamlTemplate(c *gin.Context) {
@@ -47,5 +53,21 @@ func ReloadServiceFromYamlTemplate(c *gin.Context) {
 		return
 	}
 
+	bs, _ := json.Marshal(req)
+	internalhandler.InsertOperationLog(c, ctx.UserName, req.ProjectName, "更新", "项目管理-服务", fmt.Sprintf("服务名称:%s", req.ServiceName), string(bs), ctx.Logger)
+
 	ctx.Err = svcservice.ReloadServiceFromYamlTemplate(ctx.UserName, req, ctx.Logger)
+}
+
+func PreviewServiceYamlFromYamlTemplate(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	req := new(svcservice.LoadServiceFromYamlTemplateReq)
+	if err := c.ShouldBindJSON(req); err != nil {
+		ctx.Err = err
+		return
+	}
+	req.ProjectName = c.Query("projectName")
+	ctx.Resp, ctx.Err = svcservice.PreviewServiceFromYamlTemplate(req, ctx.Logger)
 }

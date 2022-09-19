@@ -135,7 +135,7 @@ func GetProductRevision(product *commonmodels.Product, allServiceTmpls []*common
 		rendersetName := ""
 		if product.Render != nil {
 			rendersetName = product.Render.Name
-			newRender, err = commonservice.GetRenderSet(product.Render.Name, 0, log)
+			newRender, err = commonservice.GetRenderSet(product.Render.Name, 0, false, product.EnvName, log)
 			if err != nil {
 				return prodRev, err
 			}
@@ -287,6 +287,8 @@ func compareServicesRev(serviceTmplNames []string, services []*commonmodels.Prod
 				ServiceName: service.ServiceName,
 				Updatable:   true,
 				Deleted:     true,
+				Type:        service.Type,
+				Containers:  service.Containers,
 			}
 			serviceRevs = append(serviceRevs, serviceRev)
 		} else {

@@ -19,14 +19,16 @@ package handler
 import (
 	"bytes"
 	"io/ioutil"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	"gopkg.in/yaml.v3"
+
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/workflow"
 	internalhandler "github.com/koderover/zadig/pkg/shared/handler"
 	e "github.com/koderover/zadig/pkg/tool/errors"
 	"github.com/koderover/zadig/pkg/tool/log"
-	"gopkg.in/yaml.v3"
 )
 
 type listWorkflowV4Query struct {
@@ -93,11 +95,29 @@ func ListWorkflowV4(c *gin.Context) {
 		ctx.Err = err
 		return
 	}
+	ignoreWorkflow := false
+	ignoreWorkflowV4 := false
+	workflowNames, found := internalhandler.GetResourcesInHeader(c)
 
-	workflowList, total, err := workflow.ListWorkflowV4(args.Project, ctx.UserName, args.PageNum, args.PageSize, ctx.Logger)
+	ctx.Logger.Infof("workflowNames:%s found:%v", workflowNames, found)
+	var workflowV4Names, names []string
+	for _, name := range workflowNames {
+		if strings.HasPrefix(name, "common##") {
+			workflowV4Names = append(workflowV4Names, strings.Split(name, "##")[1])
+		} else {
+			names = append(names, name)
+		}
+	}
+	if found && len(names) == 0 {
+		ignoreWorkflow = true
+	}
+	if found && len(workflowV4Names) == 0 {
+		ignoreWorkflowV4 = true
+	}
+	workflowList, err := workflow.ListWorkflowV4(args.Project, ctx.UserID, names, workflowV4Names, ignoreWorkflow, ignoreWorkflowV4, ctx.Logger)
 	resp := listWorkflowV4Resp{
 		WorkflowList: workflowList,
-		Total:        total,
+		Total:        0,
 	}
 	ctx.Resp = resp
 	ctx.Err = err
@@ -135,7 +155,7 @@ func DeleteWorkflowV4(c *gin.Context) {
 
 func FindWorkflowV4(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
-	resp, err := workflow.FindWorkflowV4(c.Param("name"), ctx.Logger)
+	resp, err := workflow.FindWorkflowV4(c.Query("encryptedKey"), c.Param("name"), ctx.Logger)
 	if err != nil {
 		c.JSON(e.ErrorMessage(err))
 		c.Abort()
@@ -148,5 +168,50 @@ func GetWorkflowV4Preset(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
-	ctx.Resp, ctx.Err = workflow.GetWorkflowv4Preset(c.Param("name"), ctx.Logger)
+	ctx.Resp, ctx.Err = workflow.GetWorkflowv4Preset(c.Query("encryptedKey"), c.Param("name"), ctx.Logger)
+}
+
+func GetWebhookForWorkflowV4Preset(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	ctx.Resp, ctx.Err = workflow.GetWebhookForWorkflowV4Preset(c.Query("workflowName"), c.Query("triggerName"), ctx.Logger)
+}
+
+func ListWebhookForWorkflowV4Preset(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	ctx.Resp, ctx.Err = workflow.ListWebhookForWorkflowV4(c.Query("workflowName"), ctx.Logger)
+}
+
+func CreateWebhookForWorkflowV4(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	req := new(commonmodels.WorkflowV4Hook)
+	if err := c.ShouldBindJSON(req); err != nil {
+		ctx.Err = e.ErrInvalidParam.AddDesc(err.Error())
+		return
+	}
+	ctx.Err = workflow.CreateWebhookForWorkflowV4(c.Param("workflowName"), req, ctx.Logger)
+}
+
+func UpdateWebhookForWorkflowV4(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	req := new(commonmodels.WorkflowV4Hook)
+	if err := c.ShouldBindJSON(req); err != nil {
+		ctx.Err = e.ErrInvalidParam.AddDesc(err.Error())
+		return
+	}
+	ctx.Err = workflow.UpdateWebhookForWorkflowV4(c.Param("workflowName"), req, ctx.Logger)
+}
+
+func DeleteWebhookForWorkflowV4(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	ctx.Err = workflow.DeleteWebhookForWorkflowV4(c.Param("workflowName"), c.Param("triggerName"), ctx.Logger)
 }

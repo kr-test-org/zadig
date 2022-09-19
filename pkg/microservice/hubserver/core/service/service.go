@@ -83,13 +83,12 @@ func Authorize(req *http.Request) (clientKey string, authed bool, err error) {
 
 	clusters.Store(cluster.ID.Hex(), input.Cluster)
 
-	if cluster.Status != "normal" {
-		cluster.Status = "normal"
-		err = mongodb.NewK8sClusterColl().UpdateStatus(cluster)
-		if err != nil {
-			log.Errorf("failed to update clusters status %s %v", cluster.Name, err)
-			return
-		}
+	cluster.Status = "normal"
+	cluster.LastConnectionTime = time.Now().Unix()
+	err = mongodb.NewK8sClusterColl().UpdateStatus(cluster)
+	if err != nil {
+		log.Errorf("failed to update clusters status %s %v", cluster.Name, err)
+		return
 	}
 
 	log.Infof("cluster %s connected", cluster.Name)
@@ -260,6 +259,9 @@ func Sync(server *remotedialer.Server, stopCh <-chan struct{}) {
 				}
 
 				for _, cluster := range clusterInfos {
+					if cluster.Type == setting.KubeConfigClusterType {
+						continue
+					}
 					statusChanged := false
 					if _, ok := clusters.Load(cluster.ID.Hex()); ok && server.HasSession(cluster.ID.Hex()) {
 						if cluster.Status != config.Normal {
@@ -267,6 +269,7 @@ func Sync(server *remotedialer.Server, stopCh <-chan struct{}) {
 								"cluster %s connected changed %s => %s",
 								cluster.Name, cluster.Status, config.Normal,
 							)
+							cluster.LastConnectionTime = time.Now().Unix()
 							cluster.Status = config.Normal
 							statusChanged = true
 						}

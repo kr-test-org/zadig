@@ -29,6 +29,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/kube"
 	"github.com/koderover/zadig/pkg/setting"
@@ -44,17 +45,18 @@ const (
 )
 
 type GetContainerOptions struct {
-	Namespace    string
-	PipelineName string
-	SubTask      string
-	TailLines    int64
-	TaskID       int64
-	PipelineType string
-	ServiceName  string
-	TestName     string
-	EnvName      string
-	ProductName  string
-	ClusterID    string
+	Namespace     string
+	PipelineName  string
+	SubTask       string
+	TailLines     int64
+	TaskID        int64
+	PipelineType  string
+	ServiceName   string
+	ServiceModule string
+	TestName      string
+	EnvName       string
+	ProductName   string
+	ClusterID     string
 }
 
 func ContainerLogStream(ctx context.Context, streamChan chan interface{}, envName, productName, podName, containerName string, follow bool, tailLines int64, log *zap.SugaredLogger) {
@@ -116,14 +118,14 @@ func containerLogStream(ctx context.Context, streamChan chan interface{}, namesp
 	}
 }
 
-func TaskContainerLogStream(ctx context.Context, streamChan chan interface{}, options *GetContainerOptions, log *zap.SugaredLogger) {
-	if options == nil {
-		return
+func parseServiceName(fullServiceName, serviceModule string) (string, string) {
+	// when service module is passed, use the passed value
+	// otherwise we fall back to the old logic
+	if len(serviceModule) > 0 {
+		return strings.TrimPrefix(fullServiceName, serviceModule+"_"), serviceModule
 	}
-	log.Debugf("Start to get task container log.")
-
-	var serviceName, serviceModule string
-	serviceNames := strings.Split(options.ServiceName, "_")
+	var serviceName string
+	serviceNames := strings.Split(fullServiceName, "_")
 	switch len(serviceNames) {
 	case 1:
 		serviceModule = serviceNames[0]
@@ -132,6 +134,16 @@ func TaskContainerLogStream(ctx context.Context, streamChan chan interface{}, op
 		serviceModule = serviceNames[0]
 		serviceName = serviceNames[1]
 	}
+	return serviceName, serviceModule
+}
+
+func TaskContainerLogStream(ctx context.Context, streamChan chan interface{}, options *GetContainerOptions, log *zap.SugaredLogger) {
+	if options == nil {
+		return
+	}
+	log.Debugf("Start to get task container log.")
+
+	serviceName, serviceModule := parseServiceName(options.ServiceName, options.ServiceModule)
 
 	// Cloud host scenario reads real-time logs from the environment, so pipelineName is empty.
 	if options.EnvName != "" && options.ProductName != "" && options.PipelineName == "" {
@@ -192,6 +204,51 @@ func WorkflowTaskV4ContainerLogStream(ctx context.Context, streamChan chan inter
 		return
 	}
 	log.Debugf("Start to get task container log.")
+	task, err := commonrepo.NewworkflowTaskv4Coll().Find(options.PipelineName, options.TaskID)
+	if err != nil {
+		log.Errorf("Failed to find workflow %s taskID %s: %v", options.PipelineName, options.TaskID, err)
+		return
+	}
+	for _, stage := range task.Stages {
+		for _, job := range stage.Jobs {
+			if job.Name != options.SubTask {
+				continue
+			}
+			switch job.JobType {
+			case string(config.JobZadigBuild):
+				fallthrough
+			case string(config.JobFreestyle):
+				fallthrough
+			case string(config.JobBuild):
+				jobSpec := &commonmodels.JobTaskBuildSpec{}
+				if err := commonmodels.IToi(job.Spec, jobSpec); err != nil {
+					log.Errorf("Failed to parse job spec: %v", err)
+					return
+				}
+				options.ClusterID = jobSpec.Properties.ClusterID
+			case string(config.JobPlugin):
+				jobSpec := &commonmodels.JobTaskPluginSpec{}
+				if err := commonmodels.IToi(job.Spec, jobSpec); err != nil {
+					log.Errorf("Failed to parse job spec: %v", err)
+					return
+				}
+				options.ClusterID = jobSpec.Properties.ClusterID
+			default:
+				log.Errorf("get real-time log error, unsupported job type %s", job.JobType)
+				return
+			}
+			if options.ClusterID == "" {
+				options.ClusterID = setting.LocalClusterID
+			}
+			switch options.ClusterID {
+			case setting.LocalClusterID:
+				options.Namespace = config.Namespace()
+			default:
+				options.Namespace = setting.AttachedClusterNamespace
+			}
+			break
+		}
+	}
 
 	selector := getWorkflowSelector(options)
 	waitAndGetLog(ctx, streamChan, selector, options, log)
@@ -226,7 +283,7 @@ func waitAndGetLog(ctx context.Context, streamChan chan interface{}, selector la
 	PodCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	log.Debugf("Waiting until pod is running before establishing the stream. labelSelector: %+v", selector)
+	log.Debugf("Waiting until pod is running before establishing the stream. labelSelector: %+v, clusterId: %s, namespace: %s", selector, options.ClusterID, options.Namespace)
 	clientSet, err := kubeclient.GetClientset(config.HubServerAddress(), options.ClusterID)
 	if err != nil {
 		log.Errorf("GetContainerLogs, get client set error: %s", err)

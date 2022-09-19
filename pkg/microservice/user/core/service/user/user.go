@@ -561,6 +561,14 @@ func SyncUser(syncUserInfo *SyncUserInfo, logger *zap.SugaredLogger) (*models.Us
 		logger.Error("UpdateLoginInfo get user:%s login error, error msg:%s", user.UID, err.Error())
 		return nil, err
 	}
+	ifLoggedIn := false
+	if userLogin != nil && userLogin.LastLoginTime > 0 {
+		ifLoggedIn = true
+	}
+	err = login.CheckSignature(ifLoggedIn, logger)
+	if err != nil {
+		return nil, err
+	}
 	if userLogin != nil {
 		userLogin.LastLoginTime = time.Now().Unix()
 		err = orm.UpdateUserLogin(user.UID, userLogin, tx)
@@ -588,4 +596,22 @@ func SyncUser(syncUserInfo *SyncUserInfo, logger *zap.SugaredLogger) (*models.Us
 		return nil, err
 	}
 	return user, nil
+}
+
+func GetUserCount(logger *zap.SugaredLogger) (*types.UserStatistics, error) {
+	userCountByType, err := orm.CountUserByType(core.DB)
+	if err != nil {
+		logger.Errorf("Failed to count user by type from db, the error is: %s", err.Error())
+		return nil, err
+	}
+
+	totalActiveUser, err := orm.CountUser(core.DB)
+	if err != nil {
+		logger.Errorf("Failed to count user by type from db, the error is: %s", err.Error())
+		return nil, err
+	}
+	return &types.UserStatistics{
+		UserByType: userCountByType,
+		ActiveUser: totalActiveUser,
+	}, nil
 }
