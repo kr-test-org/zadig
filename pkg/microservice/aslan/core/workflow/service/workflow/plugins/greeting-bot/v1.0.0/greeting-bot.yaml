@@ -1,0 +1,24 @@
+name: "Hello"
+version: "v0.0.1"
+description: "Say Hi to you"
+image: koderover.tencentcloudcr.com/koderover-public/greeting-bot:20220922-amd64
+
+inputs:
+  - name: who_am_i
+    description: "who am i"
+    type: string
+    default: "Zadig"
+  - name: weather_status
+    description: "what's the weather like today"
+    type: choice
+    choice_option:
+    - sunny
+    - cloudy
+    - rainy
+    default: "sunny"
+
+envs:
+  - name: WHO_AM_I
+    value: $(inputs.who_am_i)
+  - name: WEATHER_STATUS
+    value: $(inputs.weather_status)
