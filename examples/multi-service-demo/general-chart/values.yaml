@@ -1,6 +1,7 @@
 fullnameOverride: $T-Service$
 replicaCount: 1
 port: {{.port}}
+key1: "value1"
 
 imagePullSecretsName: "default-registry-secret"
 
@@ -10,9 +11,9 @@ image:
 
 resources:
   requests:
-    cpu: 10m
-    mem: 10Mi
+    cpu: 50m
+    mem: 50Mi
 
   limits:
-    cpu: 20m
-    mem: 20Mi
+    cpu: 50m
+    mem: 50Mi
