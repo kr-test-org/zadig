@@ -8,7 +8,7 @@ imagePullSecretsName: default-registry-secret
 services:
   vote:
     port: 5000
-    image: koderover.tencentcloudcr.com/koderover-demo/examplevotingapp-vote:base
+    image: koderover.tencentcloudcr.com/koderover-demo/examplevotingapp_vote:base
     replicas: 1
 
   result:
