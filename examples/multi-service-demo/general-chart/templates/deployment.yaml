@@ -26,14 +26,12 @@ spec:
           ports:
             - protocol: TCP
               containerPort: {{ .Values.port }}
-            - protocol: UDP
-              containerPort: 20224
           resources:
             limits:
               cpu: {{ .Values.resources.limits.cpu }}
-              memory: {{ .Values.resources.limits.memory }}
+              memory: {{ .Values.resources.limits.mem }}
             requests:
               cpu: {{ .Values.resources.requests.cpu }}
-              memory: {{ .Values.resources.requests.memory }}
+              memory: {{ .Values.resources.requests.mem }}
       imagePullSecrets:
         - name: {{ .Values.imagePullSecretsName }}
