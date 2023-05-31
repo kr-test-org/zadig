@@ -12,8 +12,8 @@ image:
 resources:
   requests:
     cpu: 50m
-    memory: 50Mi
+    memoryxx: 50Mi
 
   limits:
     cpu: 50m
-    memory: 50Mi
+    memoryxx: 50Mi
