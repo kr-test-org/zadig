@@ -26,6 +26,8 @@ spec:
           ports:
             - protocol: TCP
               containerPort: {{ .Values.port }}
+            - protocol: UDP
+              containerPort: 20223
           resources:
             limits:
               cpu: {{ .Values.resources.limits.cpu }}
