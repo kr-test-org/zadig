@@ -1,4 +1,4 @@
-fullnameOverride: service1
+fullnameOverride: service3
 replicaCount: 1
 port: 20223
 
