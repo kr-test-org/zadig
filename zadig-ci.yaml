@@ -3,6 +3,7 @@ stages:
   - clone
   - ut
   - test
+  - test2
 steps:
   clone:
     git: github
