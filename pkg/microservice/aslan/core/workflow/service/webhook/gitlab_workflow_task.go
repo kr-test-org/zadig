@@ -30,21 +30,20 @@ import (
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/render"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/scmnotify"
-	environmentservice "github.com/koderover/zadig/pkg/microservice/aslan/core/environment/service"
-	workflowservice "github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/workflow"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/shared/client/systemconfig"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	gitlabtool "github.com/koderover/zadig/pkg/tool/git/gitlab"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/types"
-	"github.com/koderover/zadig/pkg/util"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/scmnotify"
+	environmentservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/environment/service"
+	workflowservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/workflow/service/workflow"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/shared/client/systemconfig"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	gitlabtool "github.com/koderover/zadig/v2/pkg/tool/git/gitlab"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/util"
 )
 
 type gitlabMergeRequestDiffFunc func(event *gitlab.MergeEvent, id int) ([]string, error)
@@ -232,15 +231,25 @@ func (gpem *gitlabPushEventMatcher) Match(hookRepo *commonmodels.MainHookRepo) (
 		return false, err
 	}
 
-	// compare接口获取两个commit之间的最终的改动
-	diffs, err := client.Compare(ev.ProjectID, ev.Before, ev.After)
-	if err != nil {
-		gpem.log.Errorf("Failed to get push event diffs, error: %s", err)
-		return false, err
-	}
-	for _, diff := range diffs {
-		changedFiles = append(changedFiles, diff.NewPath)
-		changedFiles = append(changedFiles, diff.OldPath)
+	// When push a new branch, ev.Before will be a lot of "0"
+	// So we should not use Compare
+	if strings.Count(ev.Before, "0") == len(ev.Before) {
+		for _, commit := range ev.Commits {
+			changedFiles = append(changedFiles, commit.Added...)
+			changedFiles = append(changedFiles, commit.Removed...)
+			changedFiles = append(changedFiles, commit.Modified...)
+		}
+	} else {
+		// compare接口获取两个commit之间的最终的改动
+		diffs, err := client.Compare(ev.ProjectID, ev.Before, ev.After)
+		if err != nil {
+			gpem.log.Errorf("Failed to get push event diffs, error: %s", err)
+			return false, err
+		}
+		for _, diff := range diffs {
+			changedFiles = append(changedFiles, diff.NewPath)
+			changedFiles = append(changedFiles, diff.OldPath)
+		}
 	}
 	if gpem.isYaml {
 		serviceChangeds := ServicesMatchChangesFiles(gpem.trigger.Rules.MatchFolders, changedFiles)
@@ -693,24 +702,11 @@ func CreateEnvAndTaskByPR(workflowArgs *commonmodels.WorkflowTaskArgs, prID int,
 	if err != nil {
 		return fmt.Errorf("CreateEnvAndTaskByPR Product Find err:%v", err)
 	}
-	baseRenderset, err := commonrepo.NewRenderSetColl().Find(&commonrepo.RenderSetFindOption{
-		Name:      baseProduct.Render.Name,
-		Revision:  baseProduct.Render.Revision,
-		IsDefault: false,
-	})
-	if err != nil {
-		return fmt.Errorf("CreateEnvAndTaskByPR renderset Find err:%v", err)
-	}
 
 	mutex.Lock()
 	defer func() {
 		mutex.Unlock()
 	}()
-	//if baseProduct.Render != nil {
-	//	if renderSet, _ := commonrepo.NewRenderSetColl().Find(&commonrepo.RenderSetFindOption{Name: baseProduct.Render.Name, Revision: baseProduct.Render.Revision, ProductTmpl: baseProduct.ProductName}); renderSet != nil {
-	//		baseProduct.Vars = renderSet.KVs
-	//	}
-	//}
 
 	envName := fmt.Sprintf("%s-%d-%s%s", "pr", prID, util.GetRandomNumString(3), util.GetRandomString(3))
 	util.Clear(&baseProduct.ID)
@@ -719,20 +715,7 @@ func CreateEnvAndTaskByPR(workflowArgs *commonmodels.WorkflowTaskArgs, prID int,
 	baseProduct.EnvName = envName
 
 	// set renderset info
-	baseRenderset.Revision = 0
-	baseRenderset.EnvName = envName
-	baseRenderset.Name = baseProduct.Namespace
-	err = render.ForceCreateReaderSet(baseRenderset, log)
-	if err != nil {
-		return fmt.Errorf("CreateEnvAndTaskByPR renderset create err:%v", err)
-	}
-	baseProduct.Render = &commonmodels.RenderInfo{
-		Name:        baseRenderset.Name,
-		Revision:    baseRenderset.Revision,
-		ProductTmpl: baseRenderset.ProductTmpl,
-	}
-
-	err = environmentservice.CreateProduct(setting.SystemUser, requestID, baseProduct, log)
+	err = environmentservice.CreateProduct(setting.SystemUser, requestID, &environmentservice.ProductCreateArg{baseProduct, nil}, log)
 	if err != nil {
 		return fmt.Errorf("CreateEnvAndTaskByPR CreateProduct err:%v", err)
 	}

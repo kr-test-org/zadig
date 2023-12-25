@@ -18,49 +18,26 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"go.uber.org/zap"
 
-	configbase "github.com/koderover/zadig/pkg/config"
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models/template"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	templaterepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb/template"
-	envService "github.com/koderover/zadig/pkg/microservice/aslan/core/environment/service"
-	svcService "github.com/koderover/zadig/pkg/microservice/aslan/core/service/service"
-	policyservice "github.com/koderover/zadig/pkg/microservice/policy/core/service"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/util"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models/template"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	templaterepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb/template"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	commontypes "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/types"
+	commonutil "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/util"
+	envService "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/environment/service"
+	svcService "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/service/service"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/util"
 )
 
 func CreateProjectOpenAPI(userID, username string, args *OpenAPICreateProductReq, logger *zap.SugaredLogger) error {
-	var rbs []*policyservice.RoleBinding
-	rbs = append(rbs, &policyservice.RoleBinding{
-		Name:   configbase.RoleBindingNameFromUIDAndRole(userID, setting.ProjectAdmin, ""),
-		UID:    userID,
-		Role:   string(setting.ProjectAdmin),
-		Preset: true,
-	})
-
-	if args.IsPublic {
-		rbs = append(rbs, &policyservice.RoleBinding{
-			Name:   configbase.RoleBindingNameFromUIDAndRole("*", setting.ReadOnly, ""),
-			UID:    "*",
-			Role:   string(setting.ReadOnly),
-			Preset: true,
-		})
-	}
-
-	for _, rb := range rbs {
-		err := policyservice.UpdateOrCreateRoleBinding(args.ProjectName, rb, logger)
-		if err != nil {
-			logger.Errorf("failed to create rolebinding %s, err: %s", rb.Name, err)
-			return err
-		}
-	}
-
 	// generate required information to create the project
 	// 1. find all current clusters
 	clusterList := make([]string, 0)
@@ -106,6 +83,7 @@ func CreateProjectOpenAPI(userID, username string, args *OpenAPICreateProductReq
 		ClusterIDs:     clusterList,
 		ProductFeature: feature,
 		Public:         args.IsPublic,
+		Admins:         []string{userID},
 	}
 
 	return CreateProductTemplate(createArgs, logger)
@@ -113,33 +91,6 @@ func CreateProjectOpenAPI(userID, username string, args *OpenAPICreateProductReq
 }
 
 func InitializeYAMLProject(userID, username, requestID string, args *OpenAPIInitializeProjectReq, logger *zap.SugaredLogger) error {
-
-	// =========================== FIRST STEP: project creation ===============================
-	var rbs []*policyservice.RoleBinding
-	rbs = append(rbs, &policyservice.RoleBinding{
-		Name:   configbase.RoleBindingNameFromUIDAndRole(userID, setting.ProjectAdmin, ""),
-		UID:    userID,
-		Role:   string(setting.ProjectAdmin),
-		Preset: true,
-	})
-
-	if args.IsPublic {
-		rbs = append(rbs, &policyservice.RoleBinding{
-			Name:   configbase.RoleBindingNameFromUIDAndRole("*", setting.ReadOnly, ""),
-			UID:    "*",
-			Role:   string(setting.ReadOnly),
-			Preset: true,
-		})
-	}
-
-	for _, rb := range rbs {
-		err := policyservice.UpdateOrCreateRoleBinding(args.ProjectName, rb, logger)
-		if err != nil {
-			logger.Errorf("failed to create rolebinding %s, err: %s", rb.Name, err)
-			return err
-		}
-	}
-
 	// generate required information to create the project
 	// 1. find all current clusters
 	clusterList := make([]string, 0)
@@ -170,6 +121,7 @@ func InitializeYAMLProject(userID, username, requestID string, args *OpenAPIInit
 		ClusterIDs:     clusterList,
 		ProductFeature: feature,
 		Public:         args.IsPublic,
+		Admins:         []string{userID},
 	}
 
 	err = CreateProductTemplate(createArgs, logger)
@@ -199,20 +151,21 @@ func InitializeYAMLProject(userID, username, requestID string, args *OpenAPIInit
 		} else if service.Source == config.SourceFromTemplate {
 			template, err := commonrepo.NewYamlTemplateColl().GetByName(service.TemplateName)
 			if err != nil {
-				logger.Errorf("Failed to find template of name: %s, the error is: %s", service.TemplateName, err)
+				logger.Errorf("Failed to find template of name: %s, err: %w", service.TemplateName, err)
 				return err
 			}
-			variableYaml, err := service.VariableYaml.FormYamlString()
+
+			mergedYaml, mergedKVs, err := commonutil.MergeServiceVariableKVsAndKVInput(template.ServiceVariableKVs, service.VariableYaml)
 			if err != nil {
-				logger.Errorf("Failed to form yaml string for service: %s, the error is: %s", service.ServiceName, err)
-				return err
+				return fmt.Errorf("failed to merge variable yaml, err: %w", err)
 			}
 			loadArgs := &svcService.LoadServiceFromYamlTemplateReq{
-				ProjectName:  args.ProjectKey,
-				ServiceName:  service.ServiceName,
-				TemplateID:   template.ID.Hex(),
-				AutoSync:     service.AutoSync,
-				VariableYaml: variableYaml,
+				ProjectName:        args.ProjectKey,
+				ServiceName:        service.ServiceName,
+				TemplateID:         template.ID.Hex(),
+				AutoSync:           service.AutoSync,
+				VariableYaml:       mergedYaml,
+				ServiceVariableKVs: mergedKVs,
 			}
 
 			err = svcService.LoadServiceFromYamlTemplate(username, loadArgs, false, logger)
@@ -269,6 +222,7 @@ func InitializeYAMLProject(userID, username, requestID string, args *OpenAPIInit
 				}
 				singleService.Containers = append(singleService.Containers, container)
 				singleService.VariableYaml = serviceMap[serviceName].VariableYaml
+				singleService.VariableKVs = commontypes.ServiceToRenderVariableKVs(serviceMap[serviceName].ServiceVariableKVs)
 			}
 			serviceGroup = append(serviceGroup, singleService)
 		}
@@ -296,4 +250,196 @@ func InitializeYAMLProject(userID, username, requestID string, args *OpenAPIInit
 	}
 
 	return envService.CreateYamlProduct(args.ProjectKey, username, requestID, creationArgs, logger)
+}
+
+func OpenAPIInitializeHelmProject(userID, username, requestID string, args *OpenAPIInitializeProjectReq, logger *zap.SugaredLogger) error {
+	// generate required information to create the project
+	// 1. find all current clusters
+	clusterList := make([]string, 0)
+	clusters, err := commonrepo.NewK8SClusterColl().List(&commonrepo.ClusterListOpts{})
+	if err != nil {
+		logger.Errorf("failed to find resource list to fill in to the creating project")
+		return err
+	}
+
+	for _, cluster := range clusters {
+		clusterList = append(clusterList, cluster.ID.Hex())
+	}
+
+	feature := new(template.ProductFeature)
+
+	//creating YAML type project
+	feature.BasicFacility = "kubernetes"
+	feature.CreateEnvType = "system"
+	feature.DeployType = "helm"
+
+	createArgs := &template.Product{
+		ProjectName:    args.ProjectName,
+		ProductName:    args.ProjectKey,
+		CreateTime:     time.Now().Unix(),
+		UpdateBy:       username,
+		Enabled:        true,
+		Description:    args.Description,
+		ClusterIDs:     clusterList,
+		ProductFeature: feature,
+		Public:         args.IsPublic,
+		Admins:         []string{userID},
+	}
+
+	err = CreateProductTemplate(createArgs, logger)
+	if err != nil {
+		logger.Errorf("failed to create project for initialization, error: %s", err)
+		return err
+	}
+
+	// ============================= SECOND STEP: service creation ===============================
+	for _, service := range args.ServiceList {
+		if service.Source == config.SourceFromTemplate {
+			variables := make([]*svcService.Variable, 0)
+			for _, kv := range service.VariableYaml {
+				if v, ok := kv.Value.(string); ok {
+					variables = append(variables, &svcService.Variable{
+						Key:   kv.Key,
+						Value: v,
+					})
+				}
+			}
+			template := &svcService.CreateFromChartTemplate{
+				TemplateName: service.TemplateName,
+				ValuesYAML:   service.ValuesYaml,
+				Variables:    variables,
+			}
+			templateArgs := &svcService.HelmServiceCreationArgs{
+				Name:       service.ServiceName,
+				CreatedBy:  username,
+				AutoSync:   service.AutoSync,
+				Production: false,
+			}
+			templateArgs.Source = "chartTemplate"
+			templateArgs.CreateFrom = template
+
+			_, err := svcService.CreateOrUpdateHelmServiceFromChartTemplate(args.ProjectKey, templateArgs, false, logger)
+			if err != nil {
+				logger.Errorf("failed to create service from chart template, error: %s", err)
+				return err
+			}
+
+		}
+	}
+
+	// ============================= THIRD STEP: environment creation ===============================
+	allService, err := commonrepo.NewServiceColl().ListMaxRevisionsByProduct(args.ProjectKey)
+	if err != nil {
+		logger.Errorf("failed to find service list for initialization, error: %s", err)
+		return err
+	}
+
+	creationArgs := make([]*envService.CreateSingleProductArg, 0)
+	for _, envDef := range args.EnvList {
+		clusterInfo, err := commonrepo.NewK8SClusterColl().FindByName(envDef.ClusterName)
+		if err != nil {
+			logger.Errorf("failed to find a cluster with name: %s, error: %s", envDef.ClusterName, err)
+			return errors.New("failed to find a cluster with name: " + envDef.ClusterName + " to create env: " + envDef.EnvName)
+		}
+
+		creationInfos := make([]*envService.ProductHelmServiceCreationInfo, 0)
+		for _, service := range allService {
+			creationInfo := &envService.ProductHelmServiceCreationInfo{
+				HelmSvcRenderArg: &commonservice.HelmSvcRenderArg{},
+				DeployStrategy:   "deploy",
+			}
+			if service.HelmChart != nil {
+				creationInfo.ChartVersion = service.HelmChart.Version
+			}
+			creationInfo.EnvName = envDef.EnvName
+			creationInfo.ServiceName = service.ServiceName
+			creationInfos = append(creationInfos, creationInfo)
+		}
+
+		// create env creation args
+		singleCreateArgs := &envService.CreateSingleProductArg{
+			ProductName: args.ProjectKey,
+			Namespace:   envDef.Namespace,
+			ClusterID:   clusterInfo.ID.Hex(),
+			EnvName:     envDef.EnvName,
+			Production:  false,
+			ChartValues: creationInfos,
+		}
+
+		creationArgs = append(creationArgs, singleCreateArgs)
+	}
+
+	return envService.CreateHelmProduct(args.ProjectKey, username, requestID, creationArgs, logger)
+}
+
+func ListProjectOpenAPI(pageSize, pageNum int64, logger *zap.SugaredLogger) (*OpenAPIProjectListResp, error) {
+	resp, err := ListProjects(
+		&ProjectListOptions{
+			PageSize:  pageSize,
+			PageNum:   pageNum,
+			Verbosity: VerbosityDetailed,
+		},
+		logger,
+	)
+	if err != nil {
+		logger.Errorf("OpenAPI: failed to list projects, error: %s", err)
+		return nil, err
+	}
+
+	result, ok := resp.(*ProjectDetailedResponse)
+	if !ok {
+		logger.Errorf("OpenAPI: failed to list projects, error: %v", err)
+		return nil, err
+	}
+
+	list := &OpenAPIProjectListResp{
+		Total: result.Total,
+	}
+	for _, p := range result.ProjectDetailedRepresentation {
+		list.Projects = append(list.Projects, &ProjectBrief{
+			ProjectName: p.Alias,
+			ProjectKey:  p.Name,
+			Description: p.Desc,
+			DeployType:  p.DeployType,
+		})
+	}
+	return list, nil
+}
+
+func GetProjectDetailOpenAPI(projectName string, logger *zap.SugaredLogger) (*OpenAPIProjectDetailResp, error) {
+	project, err := templaterepo.NewProductColl().Find(projectName)
+	if err != nil {
+		logger.Errorf("OpenAPI: failed to find project %s, error: %s", projectName, err)
+		return nil, err
+	}
+
+	return &OpenAPIProjectDetailResp{
+		ProjectName: project.ProjectName,
+		ProjectKey:  project.ProductName,
+		IsPublic:    project.Public,
+		Desc:        project.Description,
+		DeployType:  project.ProductFeature.DeployType,
+		CreateTime:  project.CreateTime,
+		CreatedBy:   project.UpdateBy,
+	}, nil
+}
+
+func DeleteProjectOpenAPI(userName, requestID, projectName string, isDelete bool, logger *zap.SugaredLogger) error {
+	return DeleteProductTemplate(userName, projectName, requestID, isDelete, logger)
+}
+
+func OpenAPIGetGlobalVariables(projectName string, logger *zap.SugaredLogger) (*commontypes.GlobalVariables, error) {
+	resp := &commontypes.GlobalVariables{}
+	var err error
+	resp.Variables, err = GetGlobalVariables(projectName, false, logger)
+	if err != nil {
+		logger.Errorf("failed to get global variables for project:%s", projectName)
+		return nil, err
+	}
+	resp.ProductionVariables, err = GetGlobalVariables(projectName, true, logger)
+	if err != nil {
+		logger.Errorf("failed to get global variables for project:%s", projectName)
+		return nil, err
+	}
+	return resp, nil
 }

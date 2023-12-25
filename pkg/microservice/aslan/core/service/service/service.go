@@ -22,58 +22,52 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
-	"path"
-	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"text/template"
 	gotemplate "text/template"
 	"time"
 
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/yaml"
 
-	configbase "github.com/koderover/zadig/pkg/config"
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	templatemodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models/template"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	templaterepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb/template"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/command"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/fs"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/kube"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/notify"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/pm"
-	commonutil "github.com/koderover/zadig/pkg/microservice/aslan/core/common/util"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/environment/service"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/shared/client/systemconfig"
-	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	"github.com/koderover/zadig/pkg/tool/gerrit"
-	"github.com/koderover/zadig/pkg/tool/httpclient"
-	"github.com/koderover/zadig/pkg/tool/kube/getter"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/types"
-	"github.com/koderover/zadig/pkg/util"
-	"github.com/koderover/zadig/pkg/util/converter"
+	configbase "github.com/koderover/zadig/v2/pkg/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	templatemodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models/template"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	templaterepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb/template"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/fs"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/notify"
+	commontypes "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/types"
+	commonutil "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/util"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/environment/service"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/shared/client/systemconfig"
+	kubeclient "github.com/koderover/zadig/v2/pkg/shared/kube/client"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/tool/gerrit"
+	"github.com/koderover/zadig/v2/pkg/tool/httpclient"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/getter"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	mongotool "github.com/koderover/zadig/v2/pkg/tool/mongo"
+	"github.com/koderover/zadig/v2/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/util"
+	yamlutil "github.com/koderover/zadig/v2/pkg/util/yaml"
 )
 
 type ServiceOption struct {
-	ServiceModules      []*ServiceModule           `json:"service_module"`
-	SystemVariable      []*Variable                `json:"system_variable"`
-	VariableYaml        string                     `json:"variable_yaml"`
-	ServiceVariableYaml string                     `json:"service_variable_yaml"`
-	ServiceVars         []string                   `json:"service_vars"`
-	VariableKVs         []*commonmodels.VariableKV `json:"variable_kvs"`
-	Yaml                string                     `json:"yaml"`
-	Service             *commonmodels.Service      `json:"service,omitempty"`
+	ServiceModules     []*ServiceModule                 `json:"service_module"`
+	SystemVariable     []*Variable                      `json:"system_variable"`
+	VariableYaml       string                           `json:"variable_yaml"`
+	ServiceVariableKVs []*commontypes.ServiceVariableKV `json:"service_variable_kvs"`
+	Yaml               string                           `json:"yaml"`
+	Service            *commonmodels.Service            `json:"service,omitempty"`
 }
 
 type ServiceModule struct {
@@ -119,34 +113,6 @@ type ReleaseNamingRule struct {
 	ServiceName string `json:"service_name"`
 }
 
-func ListServicesInExtenalEnv(tmpResp *commonservice.ServiceTmplResp, log *zap.SugaredLogger) {
-	opt := &commonrepo.ProductListOptions{
-		Source:        setting.SourceFromExternal,
-		ExcludeStatus: []string{setting.ProductStatusDeleting, setting.ProductStatusUnknown},
-	}
-	products, err := commonrepo.NewProductColl().List(opt)
-	if err != nil {
-		log.Errorf("Product.List failed, source:%s, err:%v", setting.SourceFromExternal, err)
-	} else {
-		for _, prod := range products {
-			_, services, err := commonservice.ListWorkloadsInEnv(prod.EnvName, prod.ProductName, "", 0, 0, log)
-			if err != nil {
-				log.Errorf("ListWorkloadsInEnv failed, envName:%s, productName:%s, source:%s, err:%v", prod.EnvName, prod.ProductName, setting.SourceFromExternal, err)
-				continue
-			}
-			for _, service := range services {
-				spmap := &commonservice.ServiceProductMap{
-					Service:     service.ServiceName,
-					Type:        service.Type,
-					ProductName: service.ProductName,
-					Product:     []string{service.ProductName},
-				}
-				tmpResp.Data = append(tmpResp.Data, spmap)
-			}
-		}
-	}
-}
-
 func GetServiceTemplateOption(serviceName, productName string, revision int64, log *zap.SugaredLogger) (*ServiceOption, error) {
 	service, err := commonservice.GetServiceTemplate(serviceName, setting.K8SDeployType, productName, setting.ProductStatusDeleting, revision, log)
 	if err != nil {
@@ -159,25 +125,6 @@ func GetServiceTemplateOption(serviceName, productName string, revision int64, l
 	}
 
 	return serviceOption, err
-}
-
-// getTemplateMergedVariables gets merged variable yaml if service is created from yaml template
-func getTemplateMergedVariables(args *commonmodels.Service) string {
-	if args.TemplateID == "" {
-		return args.VariableYaml
-	}
-	templateInfo, err := commonrepo.NewYamlTemplateColl().GetById(args.TemplateID)
-	if err != nil {
-		log.Errorf("failed to find template with id: %s for service: %s, err: %s", args.TemplateID, args.ServiceName, err)
-		return ""
-	}
-
-	variableYaml, err := buildYamlTemplateVariables(args, templateInfo)
-	if err != nil {
-		log.Errorf("failed to extract template variables for service: %s, err: %s", args.ServiceName, err)
-		return ""
-	}
-	return variableYaml
 }
 
 func GetServiceOption(args *commonmodels.Service, log *zap.SugaredLogger) (*ServiceOption, error) {
@@ -216,41 +163,14 @@ func GetServiceOption(args *commonmodels.Service, log *zap.SugaredLogger) (*Serv
 			Value: ""},
 	}
 
-	//serviceOption.VariableYaml = getTemplateMergedVariables(args)
 	serviceOption.VariableYaml = args.VariableYaml
-	serviceOption.ServiceVars = args.ServiceVars
-	if len(serviceOption.VariableYaml) > 0 {
-		flatMap, err := converter.YamlToFlatMap([]byte(serviceOption.VariableYaml))
-		if err != nil {
-			log.Errorf("failed to get flat map of variable, err: %s", err)
-		} else {
-			allKeys := sets.NewString()
-			for k, v := range flatMap {
-				serviceOption.VariableKVs = append(serviceOption.VariableKVs, &commonmodels.VariableKV{
-					Key:   k,
-					Value: v,
-				})
-				allKeys.Insert(k)
-			}
-			validServiceVars := make([]string, 0)
-			for _, k := range serviceOption.ServiceVars {
-				if allKeys.Has(k) {
-					validServiceVars = append(validServiceVars, k)
-				}
-			}
-			serviceOption.ServiceVars = validServiceVars
-		}
-	}
-	var err error
-	serviceOption.ServiceVariableYaml, err = commonutil.ClipVariableYaml(serviceOption.VariableYaml, args.ServiceVars)
-	if err != nil {
-		return serviceOption, err
-	}
+	serviceOption.ServiceVariableKVs = args.ServiceVariableKVs
 
 	if args.Source == setting.SourceFromGitlab || args.Source == setting.SourceFromGithub ||
-		args.Source == setting.SourceFromGerrit || args.Source == setting.SourceFromCodeHub || args.Source == setting.SourceFromGitee {
+		args.Source == setting.SourceFromGerrit || args.Source == setting.SourceFromGitee {
 		serviceOption.Yaml = args.Yaml
 	}
+
 	return serviceOption, nil
 }
 
@@ -269,7 +189,18 @@ func CreateK8sWorkLoads(ctx context.Context, requestID, userName string, args *K
 		log.Errorf("[%s] error: %v", args.Namespace, err)
 		return err
 	}
-	// 检查环境是否存在，envName和productName唯一
+
+	clientset, err := kubeclient.GetClientset(config.HubServerAddress(), args.ClusterID)
+	if err != nil {
+		log.Errorf("get client set error: %v", err)
+		return err
+	}
+	versionInfo, err := clientset.Discovery().ServerVersion()
+	if err != nil {
+		log.Errorf("get server version error: %v", err)
+		return err
+	}
+
 	opt := &commonrepo.ProductFindOptions{Name: args.ProductName, EnvName: args.EnvName}
 	if _, err := commonrepo.NewProductColl().Find(opt); err == nil {
 		log.Errorf("[%s][P:%s] duplicate envName in the same project", args.EnvName, args.ProductName)
@@ -287,11 +218,15 @@ func CreateK8sWorkLoads(ctx context.Context, requestID, userName string, args *K
 	for _, v := range services {
 		serviceString.Insert(v.ServiceName)
 	}
-	//for _, workload := range workLoads {
-	//	if serviceString.Has(workload.Name) {
-	//		return e.ErrCreateTemplate.AddDesc(fmt.Sprintf("do not support import same service name: %s", workload.Name))
-	//	}
-	//}
+
+	session := mongotool.Session()
+	defer session.EndSession(context.TODO())
+
+	serviceInExternalEnvCol := commonrepo.NewServiceInExternalEnvWithSess(session)
+	productCol := commonrepo.NewProductCollWithSession(session)
+	workloadStatCol := commonrepo.NewWorkLoadsStatCollWithSession(session)
+
+	mongotool.StartTransaction(session)
 
 	g := new(errgroup.Group)
 	for _, workload := range args.WorkLoads {
@@ -299,7 +234,7 @@ func CreateK8sWorkLoads(ctx context.Context, requestID, userName string, args *K
 		g.Go(func() error {
 			// If the service is already included in the database service template, add it to the new association table
 			if serviceString.Has(tempWorkload.Name) {
-				return commonrepo.NewServicesInExternalEnvColl().Create(&commonmodels.ServicesInExternalEnv{
+				return serviceInExternalEnvCol.Create(&commonmodels.ServicesInExternalEnv{
 					ProductName: args.ProductName,
 					ServiceName: tempWorkload.Name,
 					EnvName:     args.EnvName,
@@ -314,6 +249,8 @@ func CreateK8sWorkLoads(ctx context.Context, requestID, userName string, args *K
 				bs, _, err = getter.GetDeploymentYamlFormat(args.Namespace, tempWorkload.Name, kubeClient)
 			case setting.StatefulSet:
 				bs, _, err = getter.GetStatefulSetYamlFormat(args.Namespace, tempWorkload.Name, kubeClient)
+			case setting.CronJob:
+				bs, _, err = getter.GetCronJobYamlFormat(args.Namespace, tempWorkload.Name, kubeClient, service.VersionLessThan121(versionInfo))
 			}
 
 			if len(bs) == 0 || err != nil {
@@ -340,20 +277,20 @@ func CreateK8sWorkLoads(ctx context.Context, requestID, userName string, args *K
 				Source:       setting.SourceFromExternal,
 				EnvName:      args.EnvName,
 				Revision:     1,
-			}, log)
+			}, session, log)
 		})
 	}
 	if err := g.Wait(); err != nil {
+		mongotool.AbortTransaction(session)
 		return err
 	}
 
 	// 没有环境，创建环境
-	if _, err = commonrepo.NewProductColl().Find(&commonrepo.ProductFindOptions{
+	if _, err = productCol.Find(&commonrepo.ProductFindOptions{
 		Name:    args.ProductName,
 		EnvName: args.EnvName,
 	}); err != nil {
-		// no need to create renderset since renderset is not necessary in host projects
-		if err := service.CreateProduct(userName, requestID, &commonmodels.Product{
+		if err := service.CreateProduct(userName, requestID, &service.ProductCreateArg{&commonmodels.Product{
 			ProductName: args.ProductName,
 			Source:      setting.SourceFromExternal,
 			ClusterID:   args.ClusterID,
@@ -361,23 +298,34 @@ func CreateK8sWorkLoads(ctx context.Context, requestID, userName string, args *K
 			EnvName:     args.EnvName,
 			Namespace:   args.Namespace,
 			UpdateBy:    userName,
-		}, log); err != nil {
+			IsExisted:   true,
+		}, session}, log); err != nil {
+			mongotool.AbortTransaction(session)
 			return e.ErrCreateProduct.AddDesc("create product Error for unknown reason")
 		}
 	}
 
-	workLoadStat, err := commonrepo.NewWorkLoadsStatColl().Find(args.ClusterID, args.Namespace)
+	workLoadStat, err := workloadStatCol.Find(args.ClusterID, args.Namespace)
 	if err != nil {
 		workLoadStat = &commonmodels.WorkloadStat{
 			ClusterID: args.ClusterID,
 			Namespace: args.Namespace,
 			Workloads: workloadsTmp,
 		}
-		return commonrepo.NewWorkLoadsStatColl().Create(workLoadStat)
+		err = workloadStatCol.Create(workLoadStat)
+		if err != nil {
+			mongotool.AbortTransaction(session)
+			return e.ErrCreateProduct.AddErr(err)
+		}
+	} else {
+		workLoadStat.Workloads = replaceWorkloads(workLoadStat.Workloads, workloadsTmp, args.EnvName)
+		err = workloadStatCol.UpdateWorkloads(workLoadStat)
+		if err != nil {
+			mongotool.AbortTransaction(session)
+			return e.ErrCreateProduct.AddErr(err)
+		}
 	}
-
-	workLoadStat.Workloads = replaceWorkloads(workLoadStat.Workloads, workloadsTmp, args.EnvName)
-	return commonrepo.NewWorkLoadsStatColl().UpdateWorkloads(workLoadStat)
+	return mongotool.CommitTransaction(session)
 }
 
 type ServiceWorkloadsUpdateAction struct {
@@ -400,12 +348,34 @@ func UpdateWorkloads(ctx context.Context, requestID, username, productName, envN
 		log.Errorf("[%s] error: %s", args.Namespace, err)
 		return err
 	}
-	workloadStat, err := commonrepo.NewWorkLoadsStatColl().Find(args.ClusterID, args.Namespace)
+	clientset, err := kubeclient.GetClientset(config.HubServerAddress(), args.ClusterID)
 	if err != nil {
-		log.Errorf("[%s][%s]NewWorkLoadsStatColl().Find %s", args.ClusterID, args.Namespace, err)
+		log.Errorf("get client set error: %v", err)
 		return err
 	}
-	externalEnvServices, _ := commonrepo.NewServicesInExternalEnvColl().List(&commonrepo.ServicesInExternalEnvArgs{
+	versionInfo, err := clientset.Discovery().ServerVersion()
+	if err != nil {
+		log.Errorf("get server version error: %v", err)
+		return err
+	}
+
+	session := mongotool.Session()
+	defer session.EndSession(context.TODO())
+
+	serviceInExternalEnvCol := commonrepo.NewServiceInExternalEnvWithSess(session)
+	templateProductColl := templaterepo.NewProductCollWithSess(session)
+	serviceColl := commonrepo.NewServiceCollWithSession(session)
+	workloadStatCol := commonrepo.NewWorkLoadsStatCollWithSession(session)
+
+	mongotool.StartTransaction(session)
+
+	workloadStat, err := workloadStatCol.Find(args.ClusterID, args.Namespace)
+	if err != nil {
+		log.Errorf("[%s][%s]NewWorkLoadsStatColl().Find %s", args.ClusterID, args.Namespace, err)
+		mongotool.AbortTransaction(session)
+		return err
+	}
+	externalEnvServices, _ := serviceInExternalEnvCol.List(&commonrepo.ServicesInExternalEnvArgs{
 		ProductName: productName,
 		EnvName:     envName,
 	})
@@ -460,7 +430,7 @@ func UpdateWorkloads(ctx context.Context, requestID, username, productName, envN
 		}
 	}
 
-	otherExternalEnvServices, err := commonrepo.NewServicesInExternalEnvColl().List(&commonrepo.ServicesInExternalEnvArgs{
+	otherExternalEnvServices, err := serviceInExternalEnvCol.List(&commonrepo.ServicesInExternalEnvArgs{
 		ProductName:    productName,
 		ExcludeEnvName: envName,
 	})
@@ -473,9 +443,10 @@ func UpdateWorkloads(ctx context.Context, requestID, username, productName, envN
 		externalEnvServiceM[externalEnvService.ServiceName] = externalEnvService
 	}
 
-	templateProductInfo, err := templaterepo.NewProductColl().Find(productName)
+	templateProductInfo, err := templateProductColl.Find(productName)
 	if err != nil {
 		log.Errorf("failed to find template product: %s error: %s", productName, err)
+		mongotool.AbortTransaction(session)
 		return err
 	}
 
@@ -487,16 +458,16 @@ func UpdateWorkloads(ctx context.Context, requestID, username, productName, envN
 		// 删除workload的引用
 		case "delete":
 			if externalService, isExist := externalEnvServiceM[v.Name]; !isExist {
-				if err = commonrepo.NewServiceColl().UpdateExternalServicesStatus(v.Name, productName, setting.ProductStatusDeleting, envName); err != nil {
+				if err = serviceColl.UpdateExternalServicesStatus(v.Name, productName, setting.ProductStatusDeleting, envName); err != nil {
 					log.Errorf("UpdateStatus external services error:%s", err)
 				}
 			} else {
 				// Update the env name in the service
-				if err = commonrepo.NewServiceColl().UpdateExternalServiceEnvName(v.Name, productName, externalService.EnvName); err != nil {
+				if err = serviceColl.UpdateExternalServiceEnvName(v.Name, productName, externalService.EnvName); err != nil {
 					log.Errorf("UpdateEnvName external services error:%s", err)
 				}
 				// Delete the reference in the original service
-				if err = commonrepo.NewServicesInExternalEnvColl().Delete(&commonrepo.ServicesInExternalEnvArgs{
+				if err = serviceInExternalEnvCol.Delete(&commonrepo.ServicesInExternalEnvArgs{
 					ProductName: externalService.ProductName,
 					EnvName:     externalService.EnvName,
 					ServiceName: externalService.ServiceName,
@@ -504,7 +475,7 @@ func UpdateWorkloads(ctx context.Context, requestID, username, productName, envN
 					log.Errorf("delete service in external env envName:%s error:%s", externalService.EnvName, err)
 				}
 			}
-			if err = commonrepo.NewServicesInExternalEnvColl().Delete(&commonrepo.ServicesInExternalEnvArgs{
+			if err = serviceInExternalEnvCol.Delete(&commonrepo.ServicesInExternalEnvArgs{
 				ProductName: productName,
 				EnvName:     envName,
 				ServiceName: v.Name,
@@ -517,9 +488,11 @@ func UpdateWorkloads(ctx context.Context, requestID, username, productName, envN
 			var bs []byte
 			switch v.Type {
 			case setting.Deployment:
-				bs, _, err = getter.GetDeploymentYaml(args.Namespace, v.Name, kubeClient)
+				bs, _, err = getter.GetDeploymentYamlFormat(args.Namespace, v.Name, kubeClient)
 			case setting.StatefulSet:
-				bs, _, err = getter.GetStatefulSetYaml(args.Namespace, v.Name, kubeClient)
+				bs, _, err = getter.GetStatefulSetYamlFormat(args.Namespace, v.Name, kubeClient)
+			case setting.CronJob:
+				bs, _, err = getter.GetCronJobYamlFormat(args.Namespace, v.Name, kubeClient, service.VersionLessThan121(versionInfo))
 			}
 			svcNeedAdd.Insert(v.Name)
 			if len(bs) == 0 || err != nil {
@@ -537,7 +510,7 @@ func UpdateWorkloads(ctx context.Context, requestID, username, productName, envN
 				Source:       setting.SourceFromExternal,
 				EnvName:      envName,
 				Revision:     1,
-			}, log); err != nil {
+			}, session, log); err != nil {
 				log.Errorf("create service template failed err:%v", err)
 				delete(diff, v.Name)
 				continue
@@ -549,9 +522,9 @@ func UpdateWorkloads(ctx context.Context, requestID, username, productName, envN
 	if len(templateProductInfo.Services) == 1 {
 
 		func() {
-			productServices, err := commonrepo.NewServiceColl().ListExternalWorkloadsBy(productName, "")
+			productServices, err := serviceColl.ListExternalWorkloadsBy(productName, "")
 			if err != nil {
-				log.Errorf("ListWorkloads ListExternalServicesBy err:%s", err)
+				log.Errorf("ListWorkloadDetails ListExternalServicesBy err:%s", err)
 				return
 			}
 			productServiceNames := sets.NewString()
@@ -559,7 +532,7 @@ func UpdateWorkloads(ctx context.Context, requestID, username, productName, envN
 				productServiceNames.Insert(productService.ServiceName)
 			}
 			// add services in external env data
-			servicesInExternalEnv, _ := commonrepo.NewServicesInExternalEnvColl().List(&commonrepo.ServicesInExternalEnvArgs{
+			servicesInExternalEnv, _ := serviceInExternalEnvCol.List(&commonrepo.ServicesInExternalEnvArgs{
 				ProductName: productName,
 			})
 			for _, serviceInExternalEnv := range servicesInExternalEnv {
@@ -567,7 +540,7 @@ func UpdateWorkloads(ctx context.Context, requestID, username, productName, envN
 			}
 
 			templateProductInfo.Services[0] = productServiceNames.List()
-			err = templaterepo.NewProductColl().UpdateServiceOrchestration(templateProductInfo.ProductName, templateProductInfo.Services, templateProductInfo.UpdateBy)
+			err = templateProductColl.UpdateServiceOrchestration(templateProductInfo.ProductName, templateProductInfo.Services, templateProductInfo.UpdateBy)
 			if err != nil {
 				log.Errorf("failed to update service for product: %s, err: %s", templateProductInfo.ProductName, err)
 			}
@@ -577,7 +550,12 @@ func UpdateWorkloads(ctx context.Context, requestID, username, productName, envN
 
 	// 删除 && 增加
 	workloadStat.Workloads = updateWorkloads(workloadStat.Workloads, diff, envName, productName)
-	return commonrepo.NewWorkLoadsStatColl().UpdateWorkloads(workloadStat)
+	err = workloadStatCol.UpdateWorkloads(workloadStat)
+	if err != nil {
+		mongotool.AbortTransaction(session)
+		return err
+	}
+	return mongotool.CommitTransaction(session)
 }
 
 func updateWorkloads(existWorkloads []commonmodels.Workload, diff map[string]*ServiceWorkloadsUpdateAction, envName string, productName string) (result []commonmodels.Workload) {
@@ -625,7 +603,7 @@ func replaceWorkloads(existWorkloads []commonmodels.Workload, newWorkloads []com
 }
 
 // CreateWorkloadTemplate only use for workload
-func CreateWorkloadTemplate(userName string, args *commonmodels.Service, log *zap.SugaredLogger) error {
+func CreateWorkloadTemplate(userName string, args *commonmodels.Service, session mongo.Session, log *zap.SugaredLogger) error {
 	_, err := templaterepo.NewProductColl().Find(args.ProductName)
 	if err != nil {
 		log.Errorf("Failed to find project %s, err: %s", args.ProductName, err)
@@ -642,7 +620,10 @@ func CreateWorkloadTemplate(userName string, args *commonmodels.Service, log *za
 		ProductName:   args.ProductName,
 		ExcludeStatus: setting.ProductStatusDeleting,
 	}
-	_, notFoundErr := commonrepo.NewServiceColl().Find(opt)
+
+	serviceColl := commonrepo.NewServiceCollWithSession(session)
+
+	_, notFoundErr := serviceColl.Find(opt)
 	if notFoundErr != nil {
 		if productTempl, err := commonservice.GetProductTemplate(args.ProductName, log); err == nil {
 			//获取项目里面的所有服务
@@ -652,7 +633,7 @@ func CreateWorkloadTemplate(userName string, args *commonmodels.Service, log *za
 				productTempl.Services = [][]string{{args.ServiceName}}
 			}
 			//更新项目模板
-			err = templaterepo.NewProductColl().Update(args.ProductName, productTempl)
+			err = templaterepo.NewProductCollWithSess(session).Update(args.ProductName, productTempl)
 			if err != nil {
 				log.Errorf("CreateServiceTemplate Update %s error: %s", args.ServiceName, err)
 				return e.ErrCreateTemplate.AddDesc(err.Error())
@@ -666,7 +647,7 @@ func CreateWorkloadTemplate(userName string, args *commonmodels.Service, log *za
 		if err != nil {
 			return err
 		}
-		return commonrepo.NewServicesInExternalEnvColl().Create(&commonmodels.ServicesInExternalEnv{
+		return commonrepo.NewServiceInExternalEnvWithSess(session).Create(&commonmodels.ServicesInExternalEnv{
 			ProductName: args.ProductName,
 			ServiceName: args.ServiceName,
 			EnvName:     args.EnvName,
@@ -676,44 +657,59 @@ func CreateWorkloadTemplate(userName string, args *commonmodels.Service, log *za
 		//return e.ErrCreateTemplate.AddDesc("do not support import same service name")
 	}
 
-	if err := commonrepo.NewServiceColl().Delete(args.ServiceName, args.Type, args.ProductName, setting.ProductStatusDeleting, 0); err != nil {
+	if err := serviceColl.Delete(args.ServiceName, args.Type, args.ProductName, setting.ProductStatusDeleting, 0); err != nil {
 		log.Errorf("ServiceTmpl.delete %s error: %v", args.ServiceName, err)
 	}
 
-	if err := commonrepo.NewServiceColl().Create(args); err != nil {
+	if err := serviceColl.Create(args); err != nil {
 		log.Errorf("ServiceTmpl.Create %s error: %v", args.ServiceName, err)
 		return e.ErrCreateTemplate.AddDesc(err.Error())
 	}
 	return nil
 }
 
-// fillServiceVariable fill service.variableYaml and service.serviceVars by the previous revision
-// services created by [spock, template] do not need to be filled
-func fillServiceVariable(args *commonmodels.Service) {
-	if args.Source == setting.SourceFromZadig || args.Source == setting.ServiceSourceTemplate {
-		return
+// fillServiceVariable fill and merge service.variableYaml and service.serviceVariableKVs by the previous revision
+func fillServiceVariable(args *commonmodels.Service, curRevision *commonmodels.Service) error {
+	if args.Source == setting.ServiceSourceTemplate {
+		return nil
 	}
-	curRevision, err := commonrepo.NewServiceColl().Find(&commonrepo.ServiceFindOption{
-		ServiceName:   args.ServiceName,
-		Revision:      0,
-		Type:          args.Type,
-		ProductName:   args.ProductName,
-		ExcludeStatus: setting.ProductStatusDeleting,
-	})
-	if err == nil && curRevision != nil {
-		args.ServiceVars = curRevision.ServiceVars
-		args.VariableYaml = curRevision.VariableYaml
+
+	extractVariableYaml, err := yamlutil.ExtractVariableYaml(args.Yaml)
+	if err != nil {
+		return fmt.Errorf("failed to extract variable yaml from service yaml, err: %w", err)
 	}
+	extractServiceVariableKVs, err := commontypes.YamlToServiceVariableKV(extractVariableYaml, nil)
+	if err != nil {
+		return fmt.Errorf("failed to convert variable yaml to service variable kv, err: %w", err)
+	}
+
+	if args.Source == setting.SourceFromZadig {
+		args.VariableYaml, args.ServiceVariableKVs, err = commontypes.MergeServiceVariableKVsIfNotExist(args.ServiceVariableKVs, extractServiceVariableKVs)
+		if err != nil {
+			return fmt.Errorf("failed to merge service variables, err %w", err)
+		}
+	} else if curRevision != nil {
+		args.VariableYaml, args.ServiceVariableKVs, err = commontypes.MergeServiceVariableKVsIfNotExist(curRevision.ServiceVariableKVs, extractServiceVariableKVs)
+		if err != nil {
+			return fmt.Errorf("failed to merge service variables, err %w", err)
+		}
+	} else {
+		args.VariableYaml = extractVariableYaml
+		args.ServiceVariableKVs = extractServiceVariableKVs
+	}
+
+	return nil
 }
 
 func CreateServiceTemplate(userName string, args *commonmodels.Service, force bool, log *zap.SugaredLogger) (*ServiceOption, error) {
 	opt := &commonrepo.ServiceFindOption{
 		ServiceName:   args.ServiceName,
+		Revision:      0,
+		Type:          args.Type,
 		ProductName:   args.ProductName,
 		ExcludeStatus: setting.ProductStatusDeleting,
 	}
 
-	// 在更新数据库前检查是否有完全重复的Item，如果有，则退出。
 	serviceTmpl, notFoundErr := commonrepo.NewServiceColl().Find(opt)
 	if notFoundErr == nil && !force {
 		return nil, fmt.Errorf("service:%s already exists", serviceTmpl.ServiceName)
@@ -727,8 +723,11 @@ func CreateServiceTemplate(userName string, args *commonmodels.Service, force bo
 		}
 	}
 
-	// fill serviceVars and variableYaml
-	fillServiceVariable(args)
+	// fill serviceVars and variableYaml and serviceVariableKVs
+	err := fillServiceVariable(args, serviceTmpl)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fill service variable, err: %w", err)
+	}
 
 	// 校验args
 	if err := ensureServiceTmpl(userName, args, log); err != nil {
@@ -740,6 +739,7 @@ func CreateServiceTemplate(userName string, args *commonmodels.Service, force bo
 		log.Errorf("ServiceTmpl.delete %s error: %v", args.ServiceName, err)
 	}
 
+	// create a new revision of template service
 	if err := commonrepo.NewServiceColl().Create(args); err != nil {
 		log.Errorf("ServiceTmpl.Create %s error: %v", args.ServiceName, err)
 		return nil, e.ErrCreateTemplate.AddDesc(err.Error())
@@ -763,7 +763,7 @@ func CreateServiceTemplate(userName string, args *commonmodels.Service, force bo
 	}
 	commonservice.ProcessServiceWebhook(args, serviceTmpl, args.ServiceName, log)
 
-	err := service.AutoDeployYamlServiceToEnvs(userName, "", args, log)
+	err = service.AutoDeployYamlServiceToEnvs(userName, "", args, log)
 	if err != nil {
 		return nil, e.ErrCreateTemplate.AddErr(err)
 	}
@@ -771,103 +771,161 @@ func CreateServiceTemplate(userName string, args *commonmodels.Service, force bo
 	return GetServiceOption(args, log)
 }
 
-func UpdateServiceVisibility(args *commonservice.ServiceTmplObject) error {
-	currentService, err := commonrepo.NewServiceColl().Find(&commonrepo.ServiceFindOption{
-		ProductName: args.ProductName,
-		ServiceName: args.ServiceName,
-		Revision:    args.Revision,
-	})
+func CreateProductionServiceTemplate(userName string, args *commonmodels.Service, force bool, log *zap.SugaredLogger) (*ServiceOption, error) {
+	opt := &commonrepo.ServiceFindOption{
+		ServiceName:   args.ServiceName,
+		Revision:      0,
+		Type:          args.Type,
+		ProductName:   args.ProductName,
+		ExcludeStatus: setting.ProductStatusDeleting,
+	}
+
+	// Check for completely duplicate items before updating the database, and if so, exit.
+	serviceTmpl, notFoundErr := commonrepo.NewProductionServiceColl().Find(opt)
+	if notFoundErr == nil && !force {
+		return nil, fmt.Errorf("production_service:%s already exists", serviceTmpl.ServiceName)
+	} else {
+		if args.Source == setting.SourceFromGerrit {
+			// create gerrit webhook
+			if err := createGerritWebhookByService(args.GerritCodeHostID, args.ServiceName, args.GerritRepoName, args.GerritBranchName); err != nil {
+				log.Errorf("createGerritWebhookByService error: %v", err)
+				return nil, err
+			}
+		}
+	}
+
+	// fill serviceVars and variableYaml and serviceVariableKVs
+	err := fillServiceVariable(args, serviceTmpl)
 	if err != nil {
-		log.Errorf("Can not find service with option %+v. Error: %s", args, err)
-		return err
+		return nil, err
 	}
 
-	if currentService.Visibility != args.Visibility && args.Visibility == "private" {
-		projects, err := templaterepo.NewProductColl().ListWithOption(
-			&templaterepo.ProductListOpt{ContainSharedServices: []*templatemodels.ServiceInfo{{Name: args.ServiceName, Owner: args.ProductName}}},
-		)
-		if err != nil {
-			log.Errorf("Failed to list projects using service %s, err: %s", args.ServiceName, err)
-			return err
-		}
-		if len(projects) > 0 {
-			var names []string
-			for _, p := range projects {
-				names = append(names, p.ProductName)
-			}
-			log.Warnf("service %s is used by projects %s", args.ServiceName, strings.Join(names, ","))
-			errMsg := fmt.Sprintf("共享服务 [%s] 已被 [%s] 等项目服务编排中使用，请解除引用后再修改", args.ServiceName, strings.Join(names, ","))
-			return e.ErrInvalidParam.AddDesc(errMsg)
-		}
+	// check args
+	args.Production = true
+	if err := ensureServiceTmpl(userName, args, log); err != nil {
+		log.Errorf("ensureProductionServiceTmpl error: %+v", err)
+		return nil, e.ErrValidateTemplate.AddDesc(err.Error())
 	}
 
-	envStatuses := make([]*commonmodels.EnvStatus, 0)
-	// Remove environments and hosts that do not exist in the check status
-	for _, envStatus := range args.EnvStatuses {
-		var existEnv, existHost bool
-
-		envName := envStatus.EnvName
-		if _, err := commonrepo.NewProductColl().Find(&commonrepo.ProductFindOptions{
-			Name:    args.ProductName,
-			EnvName: envName,
-		}); err == nil {
-			existEnv = true
-		}
-
-		op := commonrepo.FindPrivateKeyOption{
-			Address: envStatus.Address,
-			ID:      envStatus.HostID,
-		}
-		if _, err := commonrepo.NewPrivateKeyColl().Find(op); err == nil {
-			existHost = true
-		}
-
-		if existEnv && existHost {
-			envStatuses = append(envStatuses, envStatus)
-		}
-	}
-
-	// for pm services, fill env status data
-	if args.Type == setting.PMDeployType {
-		validStatusMap := make(map[string]*commonmodels.EnvStatus)
-		for _, status := range envStatuses {
-			validStatusMap[fmt.Sprintf("%s-%s", status.EnvName, status.HostID)] = status
-		}
-
-		envStatus, err := pm.GenerateEnvStatus(currentService.EnvConfigs, log.SugaredLogger())
-		if err != nil {
-			log.Errorf("failed to generate env status")
-			return err
-		}
-		defaultStatusMap := make(map[string]*commonmodels.EnvStatus)
-		for _, status := range envStatus {
-			defaultStatusMap[fmt.Sprintf("%s-%s", status.EnvName, status.HostID)] = status
-		}
-
-		for k, _ := range defaultStatusMap {
-			if vv, ok := validStatusMap[k]; ok {
-				defaultStatusMap[k] = vv
-			}
-		}
-
-		envStatuses = make([]*commonmodels.EnvStatus, 0)
-		for _, v := range defaultStatusMap {
-			envStatuses = append(envStatuses, v)
-		}
-	}
-
-	updateArgs := &commonmodels.Service{
-		ProductName: args.ProductName,
+	if err := commonrepo.NewProductionServiceColl().DeleteByOptions(commonrepo.ProductionServiceDeleteOption{
 		ServiceName: args.ServiceName,
-		Visibility:  args.Visibility,
-		Revision:    args.Revision,
 		Type:        args.Type,
-		CreateBy:    args.Username,
-		EnvConfigs:  args.EnvConfigs,
-		EnvStatuses: envStatuses,
+		ProductName: args.ProductName,
+		Revision:    args.Revision,
+		Status:      setting.ProductStatusDeleting,
+	}); err != nil {
+		log.Errorf("ProductionServiceTmpl.delete %s error: %v", args.ServiceName, err)
 	}
-	return commonrepo.NewServiceColl().Update(updateArgs)
+
+	// create a new revision of template service
+	if err := commonrepo.NewProductionServiceColl().Create(args); err != nil {
+		log.Errorf("ProductionServiceTmpl.Create %s error: %v", args.ServiceName, err)
+		return nil, e.ErrCreateTemplate.AddDesc(err.Error())
+	}
+
+	if notFoundErr != nil {
+		if productTempl, err := commonservice.GetProductTemplate(args.ProductName, log); err == nil {
+			// get all services in the project
+			if len(productTempl.ProductionServices) > 0 && !sets.NewString(productTempl.ProductionServices[0]...).Has(args.ServiceName) {
+				productTempl.ProductionServices[0] = append(productTempl.ProductionServices[0], args.ServiceName)
+			} else {
+				productTempl.ProductionServices = [][]string{{args.ServiceName}}
+			}
+			// update project template
+			err = templaterepo.NewProductColl().Update(args.ProductName, productTempl)
+			if err != nil {
+				log.Errorf("CreateProductionServiceTemplate Update %s error: %s", args.ServiceName, err)
+				return nil, e.ErrCreateTemplate.AddDesc(err.Error())
+			}
+		}
+	}
+	commonservice.ProcessServiceWebhook(args, serviceTmpl, args.ServiceName, log)
+
+	err = service.AutoDeployYamlServiceToEnvs(userName, "", args, log)
+	if err != nil {
+		return nil, e.ErrCreateTemplate.AddErr(err)
+	}
+
+	return GetServiceOption(args, log)
 }
+
+//func UpdateServiceVisibility(args *commonservice.ServiceTmplObject) error {
+//	currentService, err := commonrepo.NewServiceColl().Find(&commonrepo.ServiceFindOption{
+//		ProductName: args.ProductName,
+//		ServiceName: args.ServiceName,
+//		Revision:    args.Revision,
+//	})
+//	if err != nil {
+//		log.Errorf("Can not find service with option %+v. Error: %s", args, err)
+//		return err
+//	}
+//
+//	envStatuses := make([]*commonmodels.EnvStatus, 0)
+//	// Remove environments and hosts that do not exist in the check status
+//	for _, envStatus := range args.EnvStatuses {
+//		var existEnv, existHost bool
+//
+//		envName := envStatus.EnvName
+//		if _, err := commonrepo.NewProductColl().Find(&commonrepo.ProductFindOptions{
+//			Name:    args.ProductName,
+//			EnvName: envName,
+//		}); err == nil {
+//			existEnv = true
+//		}
+//
+//		op := commonrepo.FindPrivateKeyOption{
+//			Address: envStatus.Address,
+//			ID:      envStatus.HostID,
+//		}
+//		if _, err := commonrepo.NewPrivateKeyColl().Find(op); err == nil {
+//			existHost = true
+//		}
+//
+//		if existEnv && existHost {
+//			envStatuses = append(envStatuses, envStatus)
+//		}
+//	}
+//
+//	// for pm services, fill env status data
+//	if args.Type == setting.PMDeployType {
+//		validStatusMap := make(map[string]*commonmodels.EnvStatus)
+//		for _, status := range envStatuses {
+//			validStatusMap[fmt.Sprintf("%s-%s", status.EnvName, status.HostID)] = status
+//		}
+//
+//		envStatus, err := pm.GenerateEnvStatus(currentService.EnvConfigs, log.SugaredLogger())
+//		if err != nil {
+//			log.Errorf("failed to generate env status")
+//			return err
+//		}
+//		defaultStatusMap := make(map[string]*commonmodels.EnvStatus)
+//		for _, status := range envStatus {
+//			defaultStatusMap[fmt.Sprintf("%s-%s", status.EnvName, status.HostID)] = status
+//		}
+//
+//		for k, _ := range defaultStatusMap {
+//			if vv, ok := validStatusMap[k]; ok {
+//				defaultStatusMap[k] = vv
+//			}
+//		}
+//
+//		envStatuses = make([]*commonmodels.EnvStatus, 0)
+//		for _, v := range defaultStatusMap {
+//			envStatuses = append(envStatuses, v)
+//		}
+//	}
+//
+//	updateArgs := &commonmodels.Service{
+//		ProductName: args.ProductName,
+//		ServiceName: args.ServiceName,
+//		Revision:    args.Revision,
+//		Type:        args.Type,
+//		CreateBy:    args.Username,
+//		EnvConfigs:  args.EnvConfigs,
+//		EnvStatuses: envStatuses,
+//	}
+//	return commonrepo.NewServiceColl().Update(updateArgs)
+//}
 
 func containersChanged(oldContainers []*commonmodels.Container, newContainers []*commonmodels.Container) bool {
 	if len(oldContainers) != len(newContainers) {
@@ -875,11 +933,11 @@ func containersChanged(oldContainers []*commonmodels.Container, newContainers []
 	}
 	oldSet := sets.NewString()
 	for _, container := range oldContainers {
-		oldSet.Insert(container.Name)
+		oldSet.Insert(fmt.Sprintf("%s-%s", container.Name, container.Image))
 	}
 	newSet := sets.NewString()
 	for _, container := range newContainers {
-		newSet.Insert(container.Name)
+		newSet.Insert(fmt.Sprintf("%s-%s", container.Name, container.Image))
 	}
 	return !oldSet.Equal(newSet)
 }
@@ -896,47 +954,33 @@ func UpdateServiceVariables(args *commonservice.ServiceTmplObject) error {
 		return e.ErrUpdateService.AddErr(fmt.Errorf("invalid service type: %v", currentService.Type))
 	}
 
-	kvs, err := kube.GeneKVFromYaml(args.VariableYaml)
-	if err != nil {
-		return e.ErrUpdateService.AddErr(fmt.Errorf("invalid variable yaml, err: %s", err))
-	}
-
-	keySet := sets.NewString()
-	for _, kv := range kvs {
-		keySet.Insert(kv.Key)
-	}
-	validatedServiceVars := make([]string, 0)
-	for _, v := range args.ServiceVars {
-		if keySet.Has(v) {
-			validatedServiceVars = append(validatedServiceVars, v)
-		}
-	}
-	currentService.ServiceVars = validatedServiceVars
 	currentService.VariableYaml = args.VariableYaml
+	currentService.ServiceVariableKVs = args.ServiceVariableKVs
+
+	currentService.RenderedYaml, err = commonutil.RenderK8sSvcYamlStrict(currentService.Yaml, args.ProductName, args.ServiceName, currentService.VariableYaml)
+	if err != nil {
+		return fmt.Errorf("failed to render yaml, err: %s", err)
+	}
 
 	err = commonrepo.NewServiceColl().UpdateServiceVariables(currentService)
 	if err != nil {
 		return e.ErrUpdateService.AddErr(err)
 	}
 
-	// reparse service, check if container changes
-	currentService.RenderedYaml, err = renderK8sSvcYamlStrict(currentService.Yaml, args.ProductName, args.ServiceName, currentService.VariableYaml)
-	if err != nil {
-		return fmt.Errorf("failed to render yaml, err: %s", err)
-	}
-
 	currentService.RenderedYaml = util.ReplaceWrapLine(currentService.RenderedYaml)
 	currentService.KubeYamls = util.SplitYaml(currentService.RenderedYaml)
+
+	// reparse service, check if container changes
 	oldContainers := currentService.Containers
 	if err := commonutil.SetCurrentContainerImages(currentService); err != nil {
 		log.Errorf("failed to ser set container images, err: %s", err)
-		//return err
 	} else if containersChanged(oldContainers, currentService.Containers) {
 		err = commonrepo.NewServiceColl().UpdateServiceContainers(currentService)
 		if err != nil {
 			log.Errorf("failed to update service containers")
 		}
 	}
+
 	return nil
 }
 
@@ -1000,7 +1044,6 @@ func UpdateServiceHealthCheckStatus(args *commonservice.ServiceTmplObject) error
 	updateArgs := &commonmodels.Service{
 		ProductName: args.ProductName,
 		ServiceName: args.ServiceName,
-		Visibility:  args.Visibility,
 		Revision:    args.Revision,
 		Type:        args.Type,
 		CreateBy:    args.Username,
@@ -1010,17 +1053,28 @@ func UpdateServiceHealthCheckStatus(args *commonservice.ServiceTmplObject) error
 	return commonrepo.NewServiceColl().UpdateServiceHealthCheckStatus(updateArgs)
 }
 
-func extractHostIPs(privateKeys []*commonmodels.PrivateKey, ips sets.String) sets.String {
-	for _, privateKey := range privateKeys {
-		ips.Insert(privateKey.IP)
-	}
-	return ips
-}
-
 func getRenderedYaml(args *YamlValidatorReq) string {
-	if len(args.VariableYaml) == 0 {
+	extractVariableYaml, err := yamlutil.ExtractVariableYaml(args.Yaml)
+	if err != nil {
+		log.Errorf("failed to extract variable yaml, err: %w", err)
+		extractVariableYaml = ""
+	}
+	extractVariableKVs, err := commontypes.YamlToServiceVariableKV(extractVariableYaml, nil)
+	if err != nil {
+		log.Errorf("failed to convert extract variable yaml to kv, err: %w", err)
+		extractVariableKVs = nil
+	}
+	argVariableKVs, err := commontypes.YamlToServiceVariableKV(args.VariableYaml, nil)
+	if err != nil {
+		log.Errorf("failed to convert arg variable yaml to kv, err: %w", err)
+		argVariableKVs = nil
+	}
+	variableYaml, _, err := commontypes.MergeServiceVariableKVs(extractVariableKVs, argVariableKVs)
+	if err != nil {
+		log.Errorf("failed to merge extractVariableKVs and argVariableKVs variable kv, err: %w", err)
 		return args.Yaml
 	}
+
 	// yaml with go template grammar, yaml should be rendered with variable yaml
 	tmpl, err := gotemplate.New(fmt.Sprintf("%v", time.Now().Unix())).Parse(args.Yaml)
 	if err != nil {
@@ -1029,7 +1083,7 @@ func getRenderedYaml(args *YamlValidatorReq) string {
 	}
 
 	variableMap := make(map[string]interface{})
-	err = yaml.Unmarshal([]byte(args.VariableYaml), &variableMap)
+	err = yaml.Unmarshal([]byte(variableYaml), &variableMap)
 	if err != nil {
 		log.Errorf("failed to get variable map, err: %s", err)
 		return args.Yaml
@@ -1079,70 +1133,6 @@ func YamlValidator(args *YamlValidatorReq) []string {
 	return errorDetails
 }
 
-// Deprecated
-func YamlViewServiceTemplate(args *YamlViewServiceTemplateReq) (string, error) {
-	opt := &commonrepo.ServiceFindOption{
-		ServiceName:   args.ServiceName,
-		ProductName:   args.ProjectName,
-		ExcludeStatus: setting.ProductStatusDeleting,
-	}
-	svcTmpl, err := commonrepo.NewServiceColl().Find(opt)
-	if err != nil {
-		return "", err
-	}
-
-	renderSet := new(commonmodels.RenderSet)
-	//renderSet.KVs = args.Variables
-	//parsedYaml := commonservice.RenderValueForString(svcTmpl.Yaml, renderSet)
-	parsedYaml, err := kube.RenderServiceYaml(svcTmpl.Yaml, args.ProjectName, svcTmpl.ServiceName, renderSet, svcTmpl.ServiceVars, svcTmpl.VariableYaml)
-	if err != nil {
-		log.Errorf("failed to render service yaml, err: %s", err)
-		return "", err
-	}
-
-	if args.EnvName != "" {
-		prod, err := commonrepo.NewProductColl().Find(&commonrepo.ProductFindOptions{
-			Name:    args.ProjectName,
-			EnvName: args.EnvName,
-		})
-		if err != nil {
-			return "", err
-		}
-
-		parsedYaml = kube.ParseSysKeys(prod.Namespace, prod.EnvName, prod.ProductName, args.ServiceName, parsedYaml)
-		cerSvc := prod.GetServiceMap()
-		svcInfo, found := cerSvc[args.ServiceName]
-		if found {
-			parsedYaml, err = replaceContainerImages(parsedYaml, svcTmpl.Containers, svcInfo.Containers)
-			if err != nil {
-				return "", err
-			}
-		}
-	}
-
-	return parsedYaml, nil
-}
-
-func replaceContainerImages(tmpl string, ori []*commonmodels.Container, replace []*commonmodels.Container) (string, error) {
-	replaceMap := make(map[string]string)
-	for _, container := range replace {
-		replaceMap[container.Name] = container.Image
-	}
-
-	for _, container := range ori {
-		imageRex, err := regexp.Compile("image:\\s*" + container.Image)
-		if err != nil {
-			return "", err
-		}
-		if _, ok := replaceMap[container.Name]; !ok {
-			continue
-		}
-		tmpl = imageRex.ReplaceAllLiteralString(tmpl, fmt.Sprintf("image: %s", replaceMap[container.Name]))
-	}
-
-	return tmpl, nil
-}
-
 func UpdateReleaseNamingRule(userName, requestID, projectName string, args *ReleaseNamingRule, log *zap.SugaredLogger) error {
 	serviceTemplate, err := commonrepo.NewServiceColl().Find(&commonrepo.ServiceFindOption{
 		ServiceName:   args.ServiceName,
@@ -1155,10 +1145,18 @@ func UpdateReleaseNamingRule(userName, requestID, projectName string, args *Rele
 		return err
 	}
 
+	products, err := commonrepo.NewProductColl().List(&commonrepo.ProductListOptions{
+		Name:       projectName,
+		Production: util.GetBoolPointer(false),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list envs for product: %s, err: %s", projectName, err)
+	}
+
 	// check if namings rule changes for services deployed in envs
 	if serviceTemplate.GetReleaseNaming() == args.NamingRule {
 		products, err := commonrepo.NewProductColl().List(&commonrepo.ProductListOptions{
-			Name: projectName,
+			Name:       projectName,
 			Production: util.GetBoolPointer(false),
 		})
 		if err != nil {
@@ -1176,19 +1174,31 @@ func UpdateReleaseNamingRule(userName, requestID, projectName string, args *Rele
 		}
 	}
 
+	// check if the release name already exists
+	for _, product := range products {
+		releaseName := util.GeneReleaseName(args.NamingRule, product.ProductName, product.Namespace, product.EnvName, args.ServiceName)
+		releaseNameMap, err := commonutil.GetReleaseNameToChartNameMap(product)
+		if err != nil {
+			return fmt.Errorf("failed to get release name to chart name map, err: %s", err)
+		}
+		if chartOrSvcName, ok := releaseNameMap[releaseName]; ok && chartOrSvcName != args.ServiceName {
+			return fmt.Errorf("release name %s already exists for chart or service %s in environment: %s", releaseName, chartOrSvcName, product.EnvName)
+		}
+	}
+
 	serviceTemplate.ReleaseNaming = args.NamingRule
-	rev, err := getNextServiceRevision(projectName, args.ServiceName)
+	rev, err := getNextServiceRevision(projectName, args.ServiceName, false)
 	if err != nil {
 		return fmt.Errorf("failed to get service next revision, service %s, err: %s", args.ServiceName, err)
 	}
 
-	basePath := config.LocalServicePath(serviceTemplate.ProductName, serviceTemplate.ServiceName)
-	if err = commonutil.PreLoadServiceManifests(basePath, serviceTemplate); err != nil {
+	basePath := config.LocalTestServicePath(serviceTemplate.ProductName, serviceTemplate.ServiceName)
+	if err = commonutil.PreLoadServiceManifests(basePath, serviceTemplate, false); err != nil {
 		return fmt.Errorf("failed to load chart info for service %s, err: %s", serviceTemplate.ServiceName, err)
 	}
 
-	fsTree := os.DirFS(config.LocalServicePath(projectName, serviceTemplate.ServiceName))
-	s3Base := config.ObjectStorageServicePath(projectName, serviceTemplate.ServiceName)
+	fsTree := os.DirFS(config.LocalTestServicePath(projectName, serviceTemplate.ServiceName))
+	s3Base := config.ObjectStorageTestServicePath(projectName, serviceTemplate.ServiceName)
 	err = fs.ArchiveAndUploadFilesToS3(fsTree, []string{fmt.Sprintf("%s-%d", serviceTemplate.ServiceName, rev)}, s3Base, log)
 	if err != nil {
 		return fmt.Errorf("failed to upload chart info for service %s, err: %s", serviceTemplate.ServiceName, err)
@@ -1212,47 +1222,89 @@ func UpdateReleaseNamingRule(userName, requestID, projectName string, args *Rele
 	return nil
 }
 
-func DeleteServiceTemplate(serviceName, serviceType, productName, isEnvTemplate, visibility string, log *zap.SugaredLogger) error {
-	openEnvTemplate, _ := strconv.ParseBool(isEnvTemplate)
-	if openEnvTemplate && visibility == "public" {
-		projects, err := templaterepo.NewProductColl().ListWithOption(
-			&templaterepo.ProductListOpt{ContainSharedServices: []*templatemodels.ServiceInfo{{Name: serviceName, Owner: productName}}},
-		)
-		if err != nil {
-			log.Errorf("Failed to list projects which are using service %s, err: %s", serviceName, err)
-			return err
-		}
-		if len(projects) > 0 {
-			var names []string
-			for _, p := range projects {
-				names = append(names, p.ProductName)
+func UpdateProductionServiceReleaseNamingRule(userName, requestID, projectName string, args *ReleaseNamingRule, log *zap.SugaredLogger) error {
+	serviceTemplate, err := commonrepo.NewProductionServiceColl().Find(&commonrepo.ServiceFindOption{
+		ServiceName:   args.ServiceName,
+		Revision:      0,
+		Type:          setting.HelmDeployType,
+		ProductName:   projectName,
+		ExcludeStatus: setting.ProductStatusDeleting,
+	})
+	if err != nil {
+		return err
+	}
+
+	products, err := commonrepo.NewProductColl().List(&commonrepo.ProductListOptions{
+		Name:       projectName,
+		Production: util.GetBoolPointer(true),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list envs for product: %s, err: %s", projectName, err)
+	}
+
+	// check if namings rule changes for services deployed in envs
+	if serviceTemplate.GetReleaseNaming() == args.NamingRule {
+		modified := false
+		for _, product := range products {
+			if pSvc, ok := product.GetServiceMap()[args.ServiceName]; ok && pSvc.Revision != serviceTemplate.Revision {
+				modified = true
+				break
 			}
-			log.Warnf("service %s is used by projects %s", serviceName, strings.Join(names, ","))
-			errMsg := fmt.Sprintf("共享服务 [%s] 已被 [%s] 等项目服务编排中使用，请解除引用后再删除", serviceName, strings.Join(names, ","))
-			return e.ErrInvalidParam.AddDesc(errMsg)
 		}
-
-		serviceEnvMap, err := distinctEnvServices(productName)
-		if err != nil {
-			errMsg := fmt.Sprintf("get distinctServiceEnv error: %v", err)
-			log.Error(errMsg)
-			return e.ErrDeleteTemplate.AddDesc(errMsg)
-		}
-
-		if _, ok := serviceEnvMap[serviceName]; ok {
-			var envNames []string
-			for _, env := range serviceEnvMap[serviceName] {
-				envNames = append(envNames, env.EnvName+"-"+env.ProductName)
-			}
-
-			log.Error(fmt.Sprintf("failed to delete service, %s already exists in %s",
-				serviceName, strings.Join(envNames, ", ")))
-
-			errMsg := fmt.Sprintf("共享服务 %s 已存在于 %s 等环境中，请对这些环境进行更新后再删除",
-				serviceName, strings.Join(envNames, ", "))
-			return e.ErrInvalidParam.AddDesc(errMsg)
+		if !modified {
+			return nil
 		}
 	}
+
+	// check if the release name already exists
+	for _, product := range products {
+		releaseName := util.GeneReleaseName(args.NamingRule, product.ProductName, product.Namespace, product.EnvName, args.ServiceName)
+		releaseNameMap, err := commonutil.GetReleaseNameToChartNameMap(product)
+		if err != nil {
+			return fmt.Errorf("failed to get release name to chart name map, err: %s", err)
+		}
+		if chartOrSvcName, ok := releaseNameMap[releaseName]; ok && chartOrSvcName != args.ServiceName {
+			return fmt.Errorf("release name %s already exists for chart or service %s in environment: %s", releaseName, chartOrSvcName, product.EnvName)
+		}
+	}
+
+	serviceTemplate.ReleaseNaming = args.NamingRule
+	rev, err := getNextServiceRevision(projectName, args.ServiceName, true)
+	if err != nil {
+		return fmt.Errorf("failed to get service next revision, service %s, err: %s", args.ServiceName, err)
+	}
+
+	basePath := config.LocalProductionServicePath(serviceTemplate.ProductName, serviceTemplate.ServiceName)
+	if err = commonutil.PreLoadProductionServiceManifests(basePath, serviceTemplate); err != nil {
+		return fmt.Errorf("failed to load chart info for service %s, err: %s", serviceTemplate.ServiceName, err)
+	}
+
+	fsTree := os.DirFS(config.LocalProductionServicePath(projectName, serviceTemplate.ServiceName))
+	s3Base := config.ObjectStorageProductionServicePath(projectName, serviceTemplate.ServiceName)
+	err = fs.ArchiveAndUploadFilesToS3(fsTree, []string{fmt.Sprintf("%s-%d", serviceTemplate.ServiceName, rev)}, s3Base, log)
+	if err != nil {
+		return fmt.Errorf("failed to upload chart info for service %s, err: %s", serviceTemplate.ServiceName, err)
+	}
+
+	serviceTemplate.Revision = rev
+	err = commonrepo.NewProductionServiceColl().Create(serviceTemplate)
+	if err != nil {
+		return fmt.Errorf("failed to update relase naming for service: %s, err: %s", args.ServiceName, err)
+	}
+
+	go func() {
+		// reinstall services in envs
+		err = service.ReInstallHelmProductionSvcInAllEnvs(projectName, serviceTemplate)
+		if err != nil {
+			title := fmt.Sprintf("服务 [%s] 重建失败", args.ServiceName)
+			notify.SendErrorMessage(userName, title, requestID, err, log)
+		}
+	}()
+
+	return nil
+}
+
+func DeleteServiceTemplate(serviceName, serviceType, productName, isEnvTemplate, visibility string, log *zap.SugaredLogger) error {
 
 	// 如果服务是PM类型，删除服务更新build的target信息
 	if serviceType == setting.PMDeployType {
@@ -1281,17 +1333,10 @@ func DeleteServiceTemplate(serviceName, serviceType, productName, isEnvTemplate,
 	}
 
 	if serviceType == setting.HelmDeployType {
-		// 更新helm renderset
-		err = removeServiceFromRenderset(productName, productName, "", serviceName)
-		if err != nil {
-			log.Warnf("failed to update renderset: %s when deleting service: %s, err: %s", productName, serviceName, err.Error())
-		}
-
 		// 把该服务相关的s3的数据从仓库删除
 		if err = fs.DeleteArchivedFileFromS3([]string{serviceName}, configbase.ObjectStorageServicePath(productName, serviceName), log); err != nil {
 			log.Warnf("Failed to delete file %s, err: %s", serviceName, err)
 		}
-		//onBoarding流程时，需要删除预定的renderset中的已经存在的renderchart信息
 	}
 
 	//删除环境模板
@@ -1310,42 +1355,8 @@ func DeleteServiceTemplate(serviceName, serviceType, productName, isEnvTemplate,
 			log.Errorf("DeleteServiceTemplate Update %s error: %v", serviceName, err)
 			return e.ErrDeleteTemplate.AddDesc(err.Error())
 		}
-
-		// still onBoarding, need to delete service from renderset
-		if serviceType == setting.HelmDeployType && productTempl.OnboardingStatus != 0 {
-			envNames := []string{"dev", "qa"}
-			for _, envName := range envNames {
-				rendersetName := commonservice.GetProductEnvNamespace(envName, productName, "")
-				err := removeServiceFromRenderset(productName, rendersetName, envName, serviceName)
-				if err != nil {
-					log.Warnf("failed to update renderset: %s when deleting service: %s, err: %s", rendersetName, serviceName, err.Error())
-				}
-			}
-		}
 	}
-
 	commonservice.DeleteServiceWebhookByName(serviceName, productName, log)
-
-	return nil
-}
-
-// remove specific services from rendersets.chartinfos
-func removeServiceFromRenderset(productName, renderName, envName, serviceName string) error {
-	renderOpt := &commonrepo.RenderSetFindOption{Name: renderName, ProductTmpl: productName, EnvName: envName}
-	if rs, err := commonrepo.NewRenderSetColl().Find(renderOpt); err == nil {
-		chartInfos := make([]*templatemodels.ServiceRender, 0)
-		for _, chartInfo := range rs.ChartInfos {
-			if chartInfo.ServiceName == serviceName {
-				continue
-			}
-			chartInfos = append(chartInfos, chartInfo)
-		}
-		rs.ChartInfos = chartInfos
-		err = commonrepo.NewRenderSetColl().Update(rs)
-		if err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -1395,83 +1406,6 @@ func ListServicePort(serviceName, serviceType, productName, excludeStatus string
 	return servicePorts, nil
 }
 
-type svcInfo struct {
-	ServiceName string `json:"service_name"`
-	ProductName string `json:"product_name"`
-}
-
-// ListAvailablePublicServices returns all public services which are not shared in the given project.
-func ListAvailablePublicServices(productName string, log *zap.SugaredLogger) ([]*svcInfo, error) {
-	project, err := templaterepo.NewProductColl().Find(productName)
-	if err != nil {
-		log.Errorf("Can not find project %s, error: %s", productName, err)
-		return nil, e.ErrListTemplate.AddDesc(err.Error())
-	}
-
-	services, err := commonrepo.NewServiceColl().ListMaxRevisions(&commonrepo.ServiceListOption{
-		Visibility: setting.PublicService, ExcludeProject: productName,
-		NotInServices: project.SharedServices,
-	})
-	if err != nil {
-		log.Errorf("Can not list services, error: %s", err)
-		return nil, e.ErrListTemplate.AddDesc(err.Error())
-	}
-
-	var res []*svcInfo
-
-	for _, s := range services {
-		res = append(res, &svcInfo{
-			ServiceName: s.ServiceName,
-			ProductName: s.ProductName,
-		})
-	}
-
-	return res, nil
-}
-
-func GetGerritServiceYaml(args *commonmodels.Service, log *zap.SugaredLogger) error {
-	//同步commit信息
-	codehostDetail, err := syncGerritLatestCommit(args)
-	if err != nil {
-		log.Errorf("Sync change log from gerrit failed, error: %v", err)
-		return err
-	}
-
-	base := path.Join(config.S3StoragePath(), args.GerritRepoName)
-	if _, err := os.Stat(base); os.IsNotExist(err) {
-		err = command.RunGitCmds(codehostDetail, setting.GerritDefaultOwner, setting.GerritDefaultOwner, args.GerritRepoName, args.GerritBranchName, args.GerritRemoteName)
-		if err != nil {
-			return err
-		}
-	}
-
-	filePath, err := os.Stat(path.Join(base, args.GerritPath))
-	if err != nil {
-		return err
-	}
-
-	if filePath.IsDir() {
-		fileInfos, err := ioutil.ReadDir(path.Join(base, args.GerritPath))
-		if err != nil {
-			return err
-		}
-		fileContents := make([]string, 0)
-		for _, file := range fileInfos {
-			if contentBytes, err := ioutil.ReadFile(path.Join(base, args.GerritPath, file.Name())); err == nil {
-				fileContents = append(fileContents, string(contentBytes))
-			} else {
-				log.Errorf("CreateServiceTemplate gerrit ReadFile err:%v", err)
-			}
-		}
-		args.Yaml = util.JoinYamls(fileContents)
-	} else {
-		if contentBytes, err := ioutil.ReadFile(path.Join(base, args.GerritPath)); err == nil {
-			args.Yaml = string(contentBytes)
-		}
-	}
-	return nil
-}
-
 func ensureServiceTmpl(userName string, args *commonmodels.Service, log *zap.SugaredLogger) error {
 	if args == nil {
 		return errors.New("service template arg is null")
@@ -1492,21 +1426,14 @@ func ensureServiceTmpl(userName string, args *commonmodels.Service, log *zap.Sug
 		}
 
 		var err error
-		args.RenderedYaml, err = renderK8sSvcYaml(args.RenderedYaml, args.ProductName, args.ServiceName, args.VariableYaml)
+		args.RenderedYaml, err = commonutil.RenderK8sSvcYaml(args.RenderedYaml, args.ProductName, args.ServiceName, args.VariableYaml)
 		if err != nil {
 			return fmt.Errorf("failed to render yaml, err: %s", err)
 		}
 
-		// Only the gerrit/spock/external type needs to be processed by yaml
-		if args.Source == setting.SourceFromGerrit || args.Source == setting.SourceFromZadig || args.Source == setting.SourceFromExternal || args.Source == setting.ServiceSourceTemplate || args.Source == setting.SourceFromGitee {
-			// 拆分 all-in-one yaml文件
-			// 替换分隔符
-			args.Yaml = util.ReplaceWrapLine(args.Yaml)
-			args.RenderedYaml = util.ReplaceWrapLine(args.RenderedYaml)
-
-			// 分隔符为\n---\n
-			args.KubeYamls = util.SplitYaml(args.RenderedYaml)
-		}
+		args.Yaml = util.ReplaceWrapLine(args.Yaml)
+		args.RenderedYaml = util.ReplaceWrapLine(args.RenderedYaml)
+		args.KubeYamls = util.SplitYaml(args.RenderedYaml)
 
 		// since service may contain go-template grammar, errors may occur when parsing as k8s workloads
 		// errors will only be logged here
@@ -1517,79 +1444,13 @@ func ensureServiceTmpl(userName string, args *commonmodels.Service, log *zap.Sug
 		log.Infof("find %d containers in service %s", len(args.Containers), args.ServiceName)
 	}
 
-	// 设置新的版本号
-	serviceTemplate := fmt.Sprintf(setting.ServiceTemplateCounterName, args.ServiceName, args.ProductName)
-	rev, err := commonrepo.NewCounterColl().GetNextSeq(serviceTemplate)
+	// get next service revision
+	rev, err := commonutil.GenerateServiceNextRevision(args.Production, args.ServiceName, args.ProductName)
 	if err != nil {
 		return fmt.Errorf("get next service template revision error: %v", err)
 	}
 
 	args.Revision = rev
-	return nil
-}
-
-// distincEnvServices 查询使用到服务模板的环境
-func distinctEnvServices(productName string) (map[string][]*commonmodels.Product, error) {
-	serviceMap := make(map[string][]*commonmodels.Product)
-	envs, err := commonrepo.NewProductColl().List(&commonrepo.ProductListOptions{Name: productName})
-	if err != nil {
-		return serviceMap, err
-	}
-
-	for _, env := range envs {
-		for _, group := range env.Services {
-			for _, service := range group {
-				if _, ok := serviceMap[service.ServiceName]; !ok {
-					serviceMap[service.ServiceName] = []*commonmodels.Product{env}
-				} else {
-					serviceMap[service.ServiceName] = append(serviceMap[service.ServiceName], env)
-				}
-			}
-		}
-	}
-	return serviceMap, nil
-}
-
-func updateGerritWebhookByService(lastService, currentService *commonmodels.Service) error {
-	var codehostDetail *systemconfig.CodeHost
-	var err error
-	if lastService != nil && lastService.Source == setting.SourceFromGerrit {
-		codehostDetail, err = systemconfig.New().GetCodeHost(lastService.GerritCodeHostID)
-		if err != nil {
-			log.Errorf("updateGerritWebhookByService GetCodehostDetail err:%v", err)
-			return err
-		}
-		cl := gerrit.NewHTTPClient(codehostDetail.Address, codehostDetail.AccessToken)
-		webhookURLPrefix := fmt.Sprintf("/%s/%s/%s", "a/config/server/webhooks~projects", gerrit.Escape(lastService.GerritRepoName), "remotes")
-		_, _ = cl.Delete(fmt.Sprintf("%s/%s", webhookURLPrefix, gerrit.RemoteName))
-		_, err = cl.Delete(fmt.Sprintf("%s/%s", webhookURLPrefix, lastService.ServiceName))
-		if err != nil {
-			log.Errorf("updateGerritWebhookByService deleteGerritWebhook err:%v", err)
-		}
-	}
-	var detail *systemconfig.CodeHost
-	if lastService.GerritCodeHostID == currentService.GerritCodeHostID && codehostDetail != nil {
-		detail = codehostDetail
-	} else {
-		detail, _ = systemconfig.New().GetCodeHost(currentService.GerritCodeHostID)
-	}
-
-	cl := gerrit.NewHTTPClient(detail.Address, detail.AccessToken)
-	webhookURL := fmt.Sprintf("/%s/%s/%s/%s", "a/config/server/webhooks~projects", gerrit.Escape(currentService.GerritRepoName), "remotes", currentService.ServiceName)
-	if _, err := cl.Get(webhookURL); err != nil {
-		log.Errorf("updateGerritWebhookByService getGerritWebhook err:%v", err)
-		//创建webhook
-		gerritWebhook := &gerrit.Webhook{
-			URL:       fmt.Sprintf("%s?name=%s", config.WebHookURL(), currentService.ServiceName),
-			MaxTries:  setting.MaxTries,
-			SslVerify: false,
-		}
-		_, err = cl.Put(webhookURL, httpclient.SetBody(gerritWebhook))
-		if err != nil {
-			log.Errorf("updateGerritWebhookByService addGerritWebhook err:%v", err)
-			return err
-		}
-	}
 	return nil
 }
 
@@ -1619,27 +1480,60 @@ func createGerritWebhookByService(codehostID int, serviceName, repoName, branchN
 	return nil
 }
 
-func syncGerritLatestCommit(service *commonmodels.Service) (*systemconfig.CodeHost, error) {
-	if service.GerritCodeHostID == 0 {
-		return nil, fmt.Errorf("codehostId不能是空的")
-	}
-	if service.GerritRepoName == "" {
-		return nil, fmt.Errorf("repoName不能是空的")
-	}
-	if service.GerritBranchName == "" {
-		return nil, fmt.Errorf("branchName不能是空的")
-	}
-	ch, _ := systemconfig.New().GetCodeHost(service.GerritCodeHostID)
-
-	gerritCli := gerrit.NewClient(ch.Address, ch.AccessToken, config.ProxyHTTPSAddr(), ch.EnableProxy)
-	commit, err := gerritCli.GetCommitByBranch(service.GerritRepoName, service.GerritBranchName)
+func ListServiceTemplateOpenAPI(projectKey string, logger *zap.SugaredLogger) ([]*OpenAPIServiceBrief, error) {
+	services, err := commonservice.ListServiceTemplate(projectKey, logger)
 	if err != nil {
-		return nil, err
+		log.Errorf("failed to list service from db, projectKey: %s, err:%v", projectKey, err)
+		return nil, fmt.Errorf("failed to list service from db, projectKey: %s, error:%v", projectKey, err)
 	}
 
-	service.Commit = &commonmodels.Commit{
-		SHA:     commit.Commit,
-		Message: commit.Message,
+	resp := make([]*OpenAPIServiceBrief, 0)
+	for _, s := range services.Data {
+		serv := &OpenAPIServiceBrief{
+			ServiceName: s.Service,
+			Source:      s.Source,
+			Type:        s.Type,
+		}
+		container := make([]*ContainerBrief, 0)
+		for _, c := range s.Containers {
+			container = append(container, &ContainerBrief{
+				Name:      c.Name,
+				ImageName: c.ImageName,
+				Image:     c.Image,
+			})
+		}
+		serv.Containers = container
+		resp = append(resp, serv)
 	}
-	return ch, nil
+
+	return resp, nil
+}
+
+func ListProductionServiceTemplateOpenAPI(projectKey string, logger *zap.SugaredLogger) ([]*OpenAPIServiceBrief, error) {
+	productionServices, err := ListProductionServices(projectKey, logger)
+	if err != nil {
+		log.Errorf("failed to list service from db, projectKey: %s, err:%v", projectKey, err)
+		return nil, fmt.Errorf("failed to list service from db, projectKey: %s, error:%v", projectKey, err)
+	}
+
+	resp := make([]*OpenAPIServiceBrief, 0)
+	for _, s := range productionServices.Data {
+		serv := &OpenAPIServiceBrief{
+			ServiceName: s.Service,
+			Source:      s.Source,
+			Type:        s.Type,
+		}
+		container := make([]*ContainerBrief, 0)
+		for _, c := range s.Containers {
+			container = append(container, &ContainerBrief{
+				Name:      c.Name,
+				ImageName: c.ImageName,
+				Image:     c.Image,
+			})
+		}
+		serv.Containers = container
+		resp = append(resp, serv)
+	}
+
+	return resp, nil
 }

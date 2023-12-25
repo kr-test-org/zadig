@@ -20,21 +20,22 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/xanzy/go-gitlab"
 	"go.uber.org/zap"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/scmnotify"
-	workflowservice "github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/workflow"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/workflow/job"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/shared/client/systemconfig"
-	gitlabtool "github.com/koderover/zadig/pkg/tool/git/gitlab"
-	"github.com/koderover/zadig/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/scmnotify"
+	workflowservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/workflow/service/workflow"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/workflow/service/workflow/job"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/shared/client/systemconfig"
+	gitlabtool "github.com/koderover/zadig/v2/pkg/tool/git/gitlab"
+	"github.com/koderover/zadig/v2/pkg/types"
 )
 
 type gitlabMergeEventMatcherForWorkflowV4 struct {
@@ -193,15 +194,25 @@ func (gpem *gitlabPushEventMatcherForWorkflowV4) Match(hookRepo *commonmodels.Ma
 		return false, err
 	}
 
-	// compare接口获取两个commit之间的最终的改动
-	diffs, err := client.Compare(ev.ProjectID, ev.Before, ev.After)
-	if err != nil {
-		gpem.log.Errorf("Failed to get push event diffs, error: %s", err)
-		return false, err
-	}
-	for _, diff := range diffs {
-		changedFiles = append(changedFiles, diff.NewPath)
-		changedFiles = append(changedFiles, diff.OldPath)
+	// When push a new branch, ev.Before will be a lot of "0"
+	// So we should not use Compare
+	if strings.Count(ev.Before, "0") == len(ev.Before) {
+		for _, commit := range ev.Commits {
+			changedFiles = append(changedFiles, commit.Added...)
+			changedFiles = append(changedFiles, commit.Removed...)
+			changedFiles = append(changedFiles, commit.Modified...)
+		}
+	} else {
+		// compare接口获取两个commit之间的最终的改动
+		diffs, err := client.Compare(ev.ProjectID, ev.Before, ev.After)
+		if err != nil {
+			gpem.log.Errorf("Failed to get push event diffs, error: %s", err)
+			return false, err
+		}
+		for _, diff := range diffs {
+			changedFiles = append(changedFiles, diff.NewPath)
+			changedFiles = append(changedFiles, diff.OldPath)
+		}
 	}
 	if gpem.isYaml {
 		serviceChangeds := ServicesMatchChangesFiles(gpem.trigger.Rules.MatchFolders, changedFiles)

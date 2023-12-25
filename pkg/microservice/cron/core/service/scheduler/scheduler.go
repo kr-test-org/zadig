@@ -17,27 +17,25 @@ limitations under the License.
 package scheduler
 
 import (
+	"encoding/json"
 	"fmt"
-	stdlog "log"
-	"os"
 	"reflect"
 	"time"
 
 	"github.com/jasonlvhit/gocron"
-	"github.com/nsqio/go-nsq"
 	"github.com/rfyiamcool/cronlib"
 	"go.uber.org/zap"
 
 	newgoCron "github.com/go-co-op/gocron"
 
-	configbase "github.com/koderover/zadig/pkg/config"
-	"github.com/koderover/zadig/pkg/microservice/cron/config"
-	"github.com/koderover/zadig/pkg/microservice/cron/core/service"
-	"github.com/koderover/zadig/pkg/microservice/cron/core/service/client"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/shared/client/aslan"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/types"
+	configbase "github.com/koderover/zadig/v2/pkg/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/cron/core/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/cron/core/service/client"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/shared/client/aslan"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/types"
 )
 
 // CronClient ...
@@ -138,33 +136,42 @@ const (
 // NewCronClient ...
 // 服务初始化
 func NewCronClient() *CronClient {
-	nsqLookupAddrs := config.NsqLookupAddrs()
-
 	aslanCli := client.NewAslanClient(fmt.Sprintf("%s/api", configbase.AslanServiceAddress()))
-	//初始化nsq
-	config := nsq.NewConfig()
-	// 注意 WD_POD_NAME 必须使用 Downward API 配置环境变量
-	config.UserAgent = "ASLAN_CRONJOB"
-	config.MaxAttempts = 50
-	config.LookupdPollInterval = 1 * time.Second
-
-	//Cronjob Client
-	cronjobClient, err := nsq.NewConsumer(setting.TopicCronjob, "cronjob", config)
-	if err != nil {
-		log.Fatalf("failed to init nsq consumer cronjob, error is %v", err)
-	}
-	cronjobClient.SetLogger(stdlog.New(os.Stdout, "nsq consumer:", 0), nsq.LogLevelError)
 
 	cronjobScheduler := cronlib.New()
 	cronjobScheduler.Start()
 
 	cronjobHandler := NewCronjobHandler(aslanCli, cronjobScheduler)
-	cronjobClient.AddConcurrentHandlers(cronjobHandler, 10)
 
-	if err := cronjobClient.ConnectToNSQLookupds(nsqLookupAddrs); err != nil {
-		errInfo := fmt.Sprintf("nsq consumer for cron job failed to start, the error is: %s", err)
-		panic(errInfo)
-	}
+	go func() {
+		for {
+			time.Sleep(3 * time.Second)
+			list, err := mongodb.NewMsgQueueCommonColl().List(&mongodb.ListMsgQueueCommonOption{
+				QueueType: setting.TopicCronjob,
+			})
+			if err != nil {
+				log.Errorf("failed to list cronjob queue, error is %v", err)
+				continue
+			}
+			msgs := []*service.CronjobPayload{}
+			for _, common := range list {
+				msg := &service.CronjobPayload{}
+				if err := json.Unmarshal([]byte(common.Payload), msg); err != nil {
+					log.Errorf("failed to unmarshal cronjob queue, error is %v", err)
+					continue
+				}
+				log.Infof("receive cronjob from queue is %+v", msg)
+				msgs = append(msgs, msg)
+				if err := mongodb.NewMsgQueueCommonColl().Delete(common.ID); err != nil {
+					log.Warnf("failed to delete cronjob queue, error is %v", err)
+				}
+			}
+			if err := cronjobHandler.HandleMessage(msgs); err != nil {
+				log.Errorf("failed to handle cronjob queue, error is %v", err)
+				continue
+			}
+		}
+	}()
 
 	return &CronClient{
 		AslanCli:                     aslanCli,
@@ -187,8 +194,6 @@ func (c *CronClient) Init() {
 	c.InitSystemCapacityGCScheduler()
 	// 定时任务触发
 	c.InitJobScheduler()
-	// 测试管理的定时任务触发
-	c.InitTestScheduler()
 
 	// 定时清理环境
 	c.InitCleanProductScheduler()
@@ -244,15 +249,6 @@ func (c *CronClient) InitJobScheduler() {
 	c.Schedulers[UpsertWorkflowScheduler].Every(1).Minutes().Do(c.UpsertWorkflowScheduler, c.log)
 
 	c.Schedulers[UpsertWorkflowScheduler].Start()
-}
-
-func (c *CronClient) InitTestScheduler() {
-
-	c.Schedulers[UpsertTestScheduler] = gocron.NewScheduler()
-
-	c.Schedulers[UpsertTestScheduler].Every(1).Minutes().Do(c.UpsertTestScheduler, c.log)
-
-	c.Schedulers[UpsertTestScheduler].Start()
 }
 
 func (c *CronClient) InitBuildStatScheduler() {

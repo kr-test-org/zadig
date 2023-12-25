@@ -19,20 +19,20 @@ package handler
 import (
 	"github.com/gin-gonic/gin"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/stat/service"
-	internalhandler "github.com/koderover/zadig/pkg/shared/handler"
-	e "github.com/koderover/zadig/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/stat/service"
+	internalhandler "github.com/koderover/zadig/v2/pkg/shared/handler"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
 )
 
 type getStatReqV2 struct {
-	StartTime   int64  `form:"start_time"`
-	EndTime     int64  `form:"end_time"`
-	ProjectName string `form:"project_name"`
+	StartTime   int64  `form:"startTime"`
+	EndTime     int64  `form:"endTime"`
+	ProjectName string `form:"projectKey"`
 }
 
 func (req *getStatReqV2) Validate() error {
 	if req.StartTime == 0 || req.EndTime == 0 {
-		return e.ErrInvalidParam.AddDesc("start_time and end_time is empty")
+		return e.ErrInvalidParam.AddDesc("starTime and endTime is empty")
 	}
 
 	if req.EndTime < req.StartTime {

@@ -20,8 +20,11 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/user/core/repository"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	gormtool "github.com/koderover/zadig/v2/pkg/tool/gorm"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
 )
 
 var rootCmd = &cobra.Command{
@@ -43,6 +46,8 @@ func init() {
 
 	_ = viper.BindPFlag(setting.ENVMongoDBConnectionString, rootCmd.PersistentFlags().Lookup("connection-string"))
 	_ = viper.BindPFlag(setting.ENVAslanDBName, rootCmd.PersistentFlags().Lookup("database"))
+
+	initMysql()
 }
 
 func initConfig() {
@@ -52,4 +57,23 @@ func initConfig() {
 		Level:    "debug",
 		NoCaller: true,
 	})
+}
+
+func initMysql() {
+	err := gormtool.Open(config.MysqlUser(),
+		config.MysqlPassword(),
+		config.MysqlHost(),
+		config.MysqlUserDB(),
+	)
+	if err != nil {
+		log.Panicf("Failed to open database %s, err: %v", config.MysqlUserDB(), err)
+	}
+
+	repository.DB = gormtool.DB(config.MysqlUserDB())
+	sqlDB, err := repository.DB.DB()
+	if err != nil {
+		panic("failed to create sqldb for user database")
+	}
+	sqlDB.SetMaxIdleConns(10)
+	sqlDB.SetMaxOpenConns(200)
 }

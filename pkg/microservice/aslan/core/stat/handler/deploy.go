@@ -19,15 +19,15 @@ package handler
 import (
 	"github.com/gin-gonic/gin"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/stat/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/stat/service"
-	internalhandler "github.com/koderover/zadig/pkg/shared/handler"
-	e "github.com/koderover/zadig/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/stat/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/stat/service"
+	internalhandler "github.com/koderover/zadig/v2/pkg/shared/handler"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
 )
 
 type GetDeployStatArgs struct {
-	StartDate int64 `json:"startDate"      form:"startDate,default:0"`
-	EndDate   int64 `json:"endDate"        form:"endDate,default:0"`
+	StartDate int64 `json:"startDate"      form:"startDate,default=0"`
+	EndDate   int64 `json:"endDate"        form:"endDate,default=0"`
 }
 
 func GetDeployStat(c *gin.Context) {
@@ -47,9 +47,9 @@ func GetDeployStat(c *gin.Context) {
 }
 
 type OpenAPIGetDeployStatArgs struct {
-	StartDate int64  `json:"startDate"      form:"startDate,default:0"`
-	EndDate   int64  `json:"endDate"        form:"endDate,default:0"`
-	Project   string `json:"project"        form:"project"`
+	StartDate int64  `json:"startDate"      form:"startDate,default=0"`
+	EndDate   int64  `json:"endDate"        form:"endDate,default=0"`
+	Project   string `json:"project"        form:"projectKey"`
 }
 
 func GetDeployStatsOpenAPI(c *gin.Context) {

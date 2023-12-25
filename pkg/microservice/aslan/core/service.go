@@ -18,64 +18,59 @@ package core
 
 import (
 	"context"
-	"database/sql"
 	_ "embed"
 	"fmt"
 	"sync"
 	"time"
 
+	newgoCron "github.com/go-co-op/gocron"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/hashicorp/go-multierror"
-
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	client2 "sigs.k8s.io/controller-runtime/pkg/client"
 
-	commonconfig "github.com/koderover/zadig/pkg/config"
-	configbase "github.com/koderover/zadig/pkg/config"
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	modeMongodb "github.com/koderover/zadig/pkg/microservice/aslan/core/collaboration/repository/mongodb"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb/template"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/kube"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/nsq"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/webhook"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/workflowcontroller"
-	environmentservice "github.com/koderover/zadig/pkg/microservice/aslan/core/environment/service"
-	labelMongodb "github.com/koderover/zadig/pkg/microservice/aslan/core/label/repository/mongodb"
-	multiclusterservice "github.com/koderover/zadig/pkg/microservice/aslan/core/multicluster/service"
-	policyservice "github.com/koderover/zadig/pkg/microservice/aslan/core/policy/service"
-	systemrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/system/repository/mongodb"
-	systemservice "github.com/koderover/zadig/pkg/microservice/aslan/core/system/service"
-	templateservice "github.com/koderover/zadig/pkg/microservice/aslan/core/templatestore/service"
-	workflowservice "github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/workflow"
-	hubserverconfig "github.com/koderover/zadig/pkg/microservice/hubserver/config"
-	"github.com/koderover/zadig/pkg/microservice/hubserver/core/repository/mongodb"
-	policydb "github.com/koderover/zadig/pkg/microservice/policy/core/repository/mongodb"
-	policybundle "github.com/koderover/zadig/pkg/microservice/policy/core/service/bundle"
-	configmongodb "github.com/koderover/zadig/pkg/microservice/systemconfig/core/email/repository/mongodb"
-	configservice "github.com/koderover/zadig/pkg/microservice/systemconfig/core/features/service"
-	userCore "github.com/koderover/zadig/pkg/microservice/user/core"
-	userdb "github.com/koderover/zadig/pkg/microservice/user/core/repository/mongodb"
-	"github.com/koderover/zadig/pkg/setting"
-	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
-	gormtool "github.com/koderover/zadig/pkg/tool/gorm"
-	"github.com/koderover/zadig/pkg/tool/log"
-	mongotool "github.com/koderover/zadig/pkg/tool/mongo"
-	"github.com/koderover/zadig/pkg/tool/rsa"
-	"github.com/koderover/zadig/pkg/types"
+	commonconfig "github.com/koderover/zadig/v2/pkg/config"
+	configbase "github.com/koderover/zadig/v2/pkg/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	modeMongodb "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/collaboration/repository/mongodb"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb/ai"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb/template"
+	vmcommonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb/vm"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/kube"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/webhook"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/workflowcontroller"
+	environmentservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/environment/service"
+	labelMongodb "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/label/repository/mongodb"
+	multiclusterservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/multicluster/service"
+	releaseplanservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/release_plan/service"
+	systemrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/system/repository/mongodb"
+	systemservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/system/service"
+	templateservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/templatestore/service"
+	workflowservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/workflow/service/workflow"
+	hubserverconfig "github.com/koderover/zadig/v2/pkg/microservice/hubserver/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/hubserver/core/repository/mongodb"
+	mongodb2 "github.com/koderover/zadig/v2/pkg/microservice/systemconfig/core/codehost/repository/mongodb"
+	configmongodb "github.com/koderover/zadig/v2/pkg/microservice/systemconfig/core/email/repository/mongodb"
+	configservice "github.com/koderover/zadig/v2/pkg/microservice/systemconfig/core/features/service"
+	userdb "github.com/koderover/zadig/v2/pkg/microservice/user/core/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	kubeclient "github.com/koderover/zadig/v2/pkg/shared/kube/client"
+	"github.com/koderover/zadig/v2/pkg/tool/git/gitlab"
+	gormtool "github.com/koderover/zadig/v2/pkg/tool/gorm"
+	"github.com/koderover/zadig/v2/pkg/tool/klock"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/multicluster"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	mongotool "github.com/koderover/zadig/v2/pkg/tool/mongo"
+	"github.com/koderover/zadig/v2/pkg/tool/rsa"
 )
 
 const (
 	webhookController = iota
-	bundleController
 )
-
-type policyGetter interface {
-	Policies() []*types.PolicyMeta
-}
 
 type Controller interface {
 	Run(workers int, stopCh <-chan struct{})
@@ -84,11 +79,9 @@ type Controller interface {
 func StartControllers(stopCh <-chan struct{}) {
 	controllerWorkers := map[int]int{
 		webhookController: 1,
-		bundleController:  1,
 	}
 	controllers := map[int]Controller{
 		webhookController: webhook.NewWebhookController(),
-		bundleController:  policybundle.NewBundleController(),
 	}
 
 	var wg sync.WaitGroup
@@ -139,6 +132,8 @@ func Start(ctx context.Context) {
 	})
 
 	initDatabase()
+	initKlock()
+	initReleasePlanWatcher()
 
 	initService()
 	initDinD()
@@ -146,10 +141,6 @@ func Start(ctx context.Context) {
 
 	// old config service initialization, it didn't panic or stop if it fails, so I will just keep it that way.
 	InitializeConfigFeatureGates()
-
-	// old user service initialization process cannot be skipped since the DB variable is in that package
-	// the db initialization process has been moved to the initDatabase function.
-	userCore.Start(context.TODO())
 
 	systemservice.SetProxyConfig()
 
@@ -171,14 +162,39 @@ func Start(ctx context.Context) {
 
 	initRsaKey()
 
-	// policy initialization process
-	policybundle.GenerateOPABundle()
-	policyservice.MigratePolicyData()
+	initCron()
 }
 
 func Stop(ctx context.Context) {
 	mongotool.Close(ctx)
 	gormtool.Close()
+}
+
+var Scheduler *newgoCron.Scheduler
+
+func initCron() {
+	Scheduler = newgoCron.NewScheduler(time.Local)
+
+	Scheduler.Every(5).Minutes().Do(func() {
+		log.Infof("[CRONJOB] updating tokens for gitlab....")
+		codehostList, err := mongodb2.NewCodehostColl().List(&mongodb2.ListArgs{
+			Source: "gitlab",
+		})
+
+		if err != nil {
+			log.Errorf("failed to list gitlab codehost err:%v", err)
+			return
+		}
+		for _, codehost := range codehostList {
+			_, err := gitlab.UpdateGitlabToken(codehost.ID, codehost.AccessToken)
+			if err != nil {
+				log.Errorf("failed to update gitlab token for host: %d, error: %s", codehost.ID, err)
+			}
+		}
+		log.Infof("[CRONJOB] gitlab token updated....")
+	})
+
+	Scheduler.StartAsync()
 }
 
 func initService() {
@@ -191,9 +207,7 @@ func initService() {
 		}
 	}()
 
-	nsq.Init(config.PodName(), config.NsqLookupAddrs())
-
-	if err := workflowservice.SubScribeNSQ(); err != nil {
+	if err := workflowservice.InitMongodbMsgQueueHandler(); err != nil {
 		errors = multierror.Append(errors, err)
 	}
 }
@@ -204,7 +218,8 @@ func initResourcesForExternalClusters() {
 	logger := log.SugaredLogger().With("func", "initResourcesForExternalClusters")
 	list, err := mongodb.NewK8sClusterColl().FindConnectedClusters()
 	if err != nil {
-		logger.Fatalf("FindConnectedClusters err: %v", err)
+		logger.Errorf("FindConnectedClusters err: %v", err)
+		return
 	}
 	namespace := "koderover-agent"
 
@@ -212,9 +227,19 @@ func initResourcesForExternalClusters() {
 		if cluster.Local || cluster.Status != hubserverconfig.Normal {
 			continue
 		}
-		client, err := kubeclient.GetKubeClient(config.HubServerAddress(), cluster.ID.Hex())
+		var client client2.Client
+		switch cluster.Type {
+		case setting.AgentClusterType, "":
+			client, err = multicluster.GetKubeClient(config.HubServerAddress(), cluster.ID.Hex())
+		case setting.KubeConfigClusterType:
+			client, err = multicluster.GetKubeClientFromKubeConfig(cluster.ID.Hex(), cluster.KubeConfig)
+		default:
+			logger.Errorf("failed to create kubeclient: unknown cluster type: %s", cluster.Type)
+			return
+		}
 		if err != nil {
-			logger.Fatalf("GetKubeClient id-%s err: %v", cluster.ID.Hex(), err)
+			logger.Errorf("GetKubeClient id-%s err: %v", cluster.ID.Hex(), err)
+			return
 		}
 
 		// create role
@@ -235,7 +260,8 @@ func initResourcesForExternalClusters() {
 			if apierrors.IsAlreadyExists(err) {
 				logger.Infof("cluster %s role is already exist", cluster.Name)
 			} else {
-				logger.Fatalf("cluster %s create role err: %s", cluster.Name, err)
+				logger.Errorf("cluster %s create role err: %s", cluster.Name, err)
+				return
 			}
 		}
 
@@ -250,7 +276,8 @@ func initResourcesForExternalClusters() {
 			if apierrors.IsAlreadyExists(err) {
 				logger.Infof("cluster %s serviceAccount is already exist", cluster.Name)
 			} else {
-				logger.Fatalf("cluster %s create serviceAccount err: %s", cluster.Name, err)
+				logger.Errorf("cluster %s create serviceAccount err: %s", cluster.Name, err)
+				return
 			}
 		}
 
@@ -277,7 +304,8 @@ func initResourcesForExternalClusters() {
 			if apierrors.IsAlreadyExists(err) {
 				logger.Infof("cluster %s role binding is already exist", cluster.Name)
 			} else {
-				logger.Fatalf("cluster %s create role binding err: %s", cluster.Name, err)
+				logger.Errorf("cluster %s create role binding err: %s", cluster.Name, err)
+				return
 			}
 		}
 		logger.Infof("cluster %s done", cluster.Name)
@@ -291,10 +319,18 @@ func initDinD() {
 	}
 }
 
-func initDatabase() {
-	// old user service initialization
-	InitializeUserDBAndTables()
+func initKlock() {
+	_ = klock.Init(config.Namespace())
+}
 
+// initReleasePlanWatcher watch release plan status and update release plan status
+// for working after aslan restart
+func initReleasePlanWatcher() {
+	go releaseplanservice.WatchExecutingWorkflow()
+	go releaseplanservice.WatchApproval()
+}
+
+func initDatabase() {
 	err := gormtool.Open(configbase.MysqlUser(),
 		configbase.MysqlPassword(),
 		configbase.MysqlHost(),
@@ -335,6 +371,7 @@ func initDatabase() {
 		commonrepo.NewConfigurationManagementColl(),
 		commonrepo.NewCounterColl(),
 		commonrepo.NewCronjobColl(),
+		commonrepo.NewCustomWorkflowTestReportColl(),
 		commonrepo.NewDeliveryActivityColl(),
 		commonrepo.NewDeliveryArtifactColl(),
 		commonrepo.NewDeliveryBuildColl(),
@@ -346,6 +383,7 @@ func initDatabase() {
 		commonrepo.NewDiffNoteColl(),
 		commonrepo.NewDindCleanColl(),
 		commonrepo.NewIMAppColl(),
+		commonrepo.NewObservabilityColl(),
 		commonrepo.NewFavoriteColl(),
 		commonrepo.NewGithubAppColl(),
 		commonrepo.NewHelmRepoColl(),
@@ -360,7 +398,6 @@ func initDatabase() {
 		commonrepo.NewProxyColl(),
 		commonrepo.NewQueueColl(),
 		commonrepo.NewRegistryNamespaceColl(),
-		commonrepo.NewRenderSetColl(),
 		commonrepo.NewS3StorageColl(),
 		commonrepo.NewServiceColl(),
 		commonrepo.NewProductionServiceColl(),
@@ -395,6 +432,15 @@ func initDatabase() {
 		commonrepo.NewJobInfoColl(),
 		commonrepo.NewStatDashboardConfigColl(),
 		commonrepo.NewProjectManagementColl(),
+		commonrepo.NewImageTagsCollColl(),
+		commonrepo.NewLLMIntegrationColl(),
+		commonrepo.NewReleasePlanColl(),
+		commonrepo.NewReleasePlanLogColl(),
+		commonrepo.NewEnvServiceVersionColl(),
+
+		// msg queue
+		commonrepo.NewMsgQueueCommonColl(),
+		commonrepo.NewMsgQueuePipelineTaskColl(),
 
 		systemrepo.NewAnnouncementColl(),
 		systemrepo.NewOperationLogColl(),
@@ -406,13 +452,20 @@ func initDatabase() {
 		// config related db index
 		configmongodb.NewEmailHostColl(),
 
-		// policy related db index
-		policydb.NewRoleColl(),
-		policydb.NewRoleBindingColl(),
-		policydb.NewPolicyMetaColl(),
-
 		// user related db index
 		userdb.NewUserSettingColl(),
+
+		// env AI analysis related db index
+		ai.NewEnvAIAnalysisColl(),
+
+		// project group related db index
+		commonrepo.NewProjectGroupColl(),
+
+		// db instances
+		commonrepo.NewDBInstanceColl(),
+
+		// vm job related db index
+		vmcommonrepo.NewVMJobColl(),
 	} {
 		wg.Add(1)
 		go func(r indexer) {
@@ -456,27 +509,4 @@ func InitializeConfigFeatureGates() error {
 	}
 	configservice.Features.MergeFeatureGates(flagFG, dbFG)
 	return nil
-}
-
-//go:embed init/mysql.sql
-var mysql []byte
-
-func InitializeUserDBAndTables() {
-	if len(mysql) == 0 {
-		return
-	}
-	db, err := sql.Open("mysql", fmt.Sprintf(
-		"%s:%s@tcp(%s)/?charset=utf8&multiStatements=true",
-		configbase.MysqlUser(), configbase.MysqlPassword(), configbase.MysqlHost(),
-	))
-	if err != nil {
-		log.Panic(err)
-	}
-	defer db.Close()
-	initSql := fmt.Sprintf(string(mysql), config.MysqlUserDB(), config.MysqlUserDB())
-	_, err = db.Exec(initSql)
-
-	if err != nil {
-		log.Panic(err)
-	}
 }

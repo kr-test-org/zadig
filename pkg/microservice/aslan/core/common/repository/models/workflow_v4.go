@@ -21,15 +21,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/tool/lark"
-	"github.com/koderover/zadig/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commontypes "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/types"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/tool/dingtalk"
+	"github.com/koderover/zadig/v2/pkg/tool/guanceyun"
+	"github.com/koderover/zadig/v2/pkg/tool/lark"
+	"github.com/koderover/zadig/v2/pkg/types"
 )
 
 type WorkflowV4 struct {
@@ -46,7 +50,6 @@ type WorkflowV4 struct {
 	CreateTime      int64                    `bson:"create_time"         yaml:"create_time"         json:"create_time"`
 	UpdatedBy       string                   `bson:"updated_by"          yaml:"updated_by"          json:"updated_by"`
 	UpdateTime      int64                    `bson:"update_time"         yaml:"update_time"         json:"update_time"`
-	MultiRun        bool                     `bson:"multi_run"           yaml:"multi_run"           json:"multi_run"`
 	NotifyCtls      []*NotifyCtl             `bson:"notify_ctls"         yaml:"notify_ctls"         json:"notify_ctls"`
 	Debug           bool                     `bson:"debug"               yaml:"-"                   json:"debug"`
 	HookCtls        []*WorkflowV4Hook        `bson:"hook_ctl"            yaml:"-"                   json:"hook_ctl"`
@@ -58,6 +61,10 @@ type WorkflowV4 struct {
 	BaseName        string                   `bson:"base_name"           yaml:"-"                   json:"base_name"`
 	ShareStorages   []*ShareStorage          `bson:"share_storages"      yaml:"share_storages"      json:"share_storages"`
 	Hash            string                   `bson:"hash"                yaml:"hash"                json:"hash"`
+	// ConcurrencyLimit is the max number of concurrent runs of this workflow
+	// -1 means no limit
+	ConcurrencyLimit int          `bson:"concurrency_limit"   yaml:"concurrency_limit"   json:"concurrency_limit"`
+	CustomField      *CustomField `bson:"custom_field"        yaml:"-"                   json:"custom_field"`
 }
 
 func (w *WorkflowV4) UpdateHash() {
@@ -91,14 +98,15 @@ type WorkflowStage struct {
 }
 
 type Approval struct {
-	Enabled        bool                `bson:"enabled"                     yaml:"enabled"                       json:"enabled"`
-	Status         config.Status       `bson:"status"                      yaml:"status"                        json:"status"`
-	Type           config.ApprovalType `bson:"type"                        yaml:"type"                          json:"type"`
-	Description    string              `bson:"description"                 yaml:"description"                   json:"description"`
-	StartTime      int64               `bson:"start_time"                  yaml:"start_time,omitempty"          json:"start_time,omitempty"`
-	EndTime        int64               `bson:"end_time"                    yaml:"end_time,omitempty"            json:"end_time,omitempty"`
-	NativeApproval *NativeApproval     `bson:"native_approval"             yaml:"native_approval,omitempty"     json:"native_approval,omitempty"`
-	LarkApproval   *LarkApproval       `bson:"lark_approval"               yaml:"lark_approval,omitempty"       json:"lark_approval,omitempty"`
+	Enabled          bool                `bson:"enabled"                     yaml:"enabled"                       json:"enabled"`
+	Status           config.Status       `bson:"status"                      yaml:"status"                        json:"status"`
+	Type             config.ApprovalType `bson:"type"                        yaml:"type"                          json:"type"`
+	Description      string              `bson:"description"                 yaml:"description"                   json:"description"`
+	StartTime        int64               `bson:"start_time"                  yaml:"start_time,omitempty"          json:"start_time,omitempty"`
+	EndTime          int64               `bson:"end_time"                    yaml:"end_time,omitempty"            json:"end_time,omitempty"`
+	NativeApproval   *NativeApproval     `bson:"native_approval"             yaml:"native_approval,omitempty"     json:"native_approval,omitempty"`
+	LarkApproval     *LarkApproval       `bson:"lark_approval"               yaml:"lark_approval,omitempty"       json:"lark_approval,omitempty"`
+	DingTalkApproval *DingTalkApproval   `bson:"dingtalk_approval"           yaml:"dingtalk_approval,omitempty"   json:"dingtalk_approval,omitempty"`
 }
 
 type NativeApproval struct {
@@ -106,24 +114,93 @@ type NativeApproval struct {
 	ApproveUsers    []*User                `bson:"approve_users"               yaml:"approve_users"              json:"approve_users"`
 	NeededApprovers int                    `bson:"needed_approvers"            yaml:"needed_approvers"           json:"needed_approvers"`
 	RejectOrApprove config.ApproveOrReject `bson:"reject_or_approve"           yaml:"-"                          json:"reject_or_approve"`
+	// InstanceCode: native approval instance code, save for working after restart aslan
+	InstanceCode string `bson:"instance_code"               yaml:"instance_code"              json:"instance_code"`
+}
+
+type DingTalkApproval struct {
+	Timeout int `bson:"timeout"                     yaml:"timeout"                    json:"timeout"`
+	// ID: dintalk im app mongodb id
+	ID string `bson:"approval_id"                 yaml:"approval_id"                json:"approval_id"`
+	// DefaultApprovalInitiator if not set, use workflow task creator as approval initiator
+	DefaultApprovalInitiator *DingTalkApprovalUser   `bson:"default_approval_initiator" yaml:"default_approval_initiator" json:"default_approval_initiator"`
+	ApprovalNodes            []*DingTalkApprovalNode `bson:"approval_nodes"             yaml:"approval_nodes"             json:"approval_nodes"`
+	// InstanceCode: dingtalk approval instance code
+	InstanceCode string `bson:"instance_code"              yaml:"instance_code"              json:"instance_code"`
+}
+
+type DingTalkApprovalNode struct {
+	ApproveUsers    []*DingTalkApprovalUser `bson:"approve_users"               yaml:"approve_users"              json:"approve_users"`
+	Type            dingtalk.ApprovalAction `bson:"type"                        yaml:"type"                       json:"type"`
+	RejectOrApprove config.ApproveOrReject  `bson:"reject_or_approve"           yaml:"-"                          json:"reject_or_approve"`
+}
+
+type DingTalkApprovalUser struct {
+	ID              string                 `bson:"id"                          yaml:"id"                         json:"id"`
+	Name            string                 `bson:"name"                        yaml:"name"                       json:"name"`
+	Avatar          string                 `bson:"avatar"                      yaml:"avatar"                     json:"avatar"`
+	RejectOrApprove config.ApproveOrReject `bson:"reject_or_approve,omitempty"           yaml:"-"                          json:"reject_or_approve,omitempty"`
+	Comment         string                 `bson:"comment,omitempty"                     yaml:"-"                          json:"comment,omitempty"`
+	OperationTime   int64                  `bson:"operation_time,omitempty"              yaml:"-"                          json:"operation_time,omitempty"`
 }
 
 type LarkApproval struct {
-	Timeout      int                 `bson:"timeout"                     yaml:"timeout"                    json:"timeout"`
-	ApprovalID   string              `bson:"approval_id"                 yaml:"approval_id"                json:"approval_id"`
-	ApproveUsers []*LarkApprovalUser `bson:"approve_users"               yaml:"approve_users"              json:"approve_users"`
+	Timeout int `bson:"timeout"                     yaml:"timeout"                    json:"timeout"`
+	// ID: lark im app mongodb id
+	ID string `bson:"approval_id"                 yaml:"approval_id"                json:"approval_id"`
+	// DefaultApprovalInitiator if not set, use workflow task creator as approval initiator
+	DefaultApprovalInitiator *LarkApprovalUser `bson:"default_approval_initiator" yaml:"default_approval_initiator" json:"default_approval_initiator"`
+	// Deprecated: use ApprovalNodes instead
+	ApproveUsers  []*LarkApprovalUser `bson:"approve_users"               yaml:"approve_users"              json:"approve_users"`
+	ApprovalNodes []*LarkApprovalNode `bson:"approval_nodes"               yaml:"approval_nodes"              json:"approval_nodes"`
+	// InstanceCode: lark approval instance code
+	InstanceCode string `bson:"instance_code"               yaml:"instance_code"              json:"instance_code"`
+}
+
+// GetNodeTypeKey get node type key for deduplication
+func (l LarkApproval) GetNodeTypeKey() string {
+	var keys []string
+	for _, node := range l.ApprovalNodes {
+		keys = append(keys, string(node.Type))
+	}
+	return strings.Join(keys, "-")
+}
+
+// GetLarkApprovalNode convert approval node to lark sdk approval node
+func (l LarkApproval) GetLarkApprovalNode() (resp []*lark.ApprovalNode) {
+	for _, node := range l.ApprovalNodes {
+		resp = append(resp, &lark.ApprovalNode{
+			ApproverIDList: func() (re []string) {
+				for _, user := range node.ApproveUsers {
+					re = append(re, user.ID)
+				}
+				return
+			}(),
+			Type: node.Type,
+		})
+	}
+	return
+}
+
+type LarkApprovalNode struct {
+	ApproveUsers    []*LarkApprovalUser    `bson:"approve_users"               yaml:"approve_users"              json:"approve_users"`
+	Type            lark.ApproveType       `bson:"type"                        yaml:"type"                       json:"type"`
+	RejectOrApprove config.ApproveOrReject `bson:"reject_or_approve"           yaml:"-"                          json:"reject_or_approve"`
 }
 
 type LarkApprovalUser struct {
 	lark.UserInfo   `bson:",inline"  yaml:",inline"  json:",inline"`
-	RejectOrApprove config.ApproveOrReject `bson:"reject_or_approve"           yaml:"-"                          json:"reject_or_approve"`
-	Comment         string                 `bson:"comment"                     yaml:"-"                          json:"comment"`
-	OperationTime   int64                  `bson:"operation_time"              yaml:"-"                          json:"operation_time"`
+	RejectOrApprove config.ApproveOrReject `bson:"reject_or_approve,omitempty"           yaml:"-"                          json:"reject_or_approve,omitempty"`
+	Comment         string                 `bson:"comment,omitempty"                     yaml:"-"                          json:"comment,omitempty"`
+	OperationTime   int64                  `bson:"operation_time,omitempty"              yaml:"-"                          json:"operation_time,omitempty"`
 }
 
 type User struct {
-	UserID          string                 `bson:"user_id"                     yaml:"user_id"                    json:"user_id"`
-	UserName        string                 `bson:"user_name"                   yaml:"user_name"                  json:"user_name"`
+	Type            string                 `bson:"type"                        yaml:"type"                       json:"type"`
+	UserID          string                 `bson:"user_id,omitempty"           yaml:"user_id,omitempty"          json:"user_id,omitempty"`
+	UserName        string                 `bson:"user_name,omitempty"         yaml:"user_name,omitempty"        json:"user_name,omitempty"`
+	GroupID         string                 `bson:"group_id,omitempty"          yaml:"group_id,omitempty"         json:"group_id,omitempty"`
+	GroupName       string                 `bson:"group_name,omitempty"        yaml:"group_name,omitempty"       json:"group_name,omitempty"`
 	RejectOrApprove config.ApproveOrReject `bson:"reject_or_approve"           yaml:"-"                          json:"reject_or_approve"`
 	Comment         string                 `bson:"comment"                     yaml:"-"                          json:"comment"`
 	OperationTime   int64                  `bson:"operation_time"              yaml:"-"                          json:"operation_time"`
@@ -133,9 +210,16 @@ type Job struct {
 	Name    string         `bson:"name"           yaml:"name"     json:"name"`
 	JobType config.JobType `bson:"type"           yaml:"type"     json:"type"`
 	// only for webhook workflow args to skip some tasks.
-	Skipped   bool                `bson:"skipped"        yaml:"skipped"  json:"skipped"`
-	Spec      interface{}         `bson:"spec"           yaml:"spec"     json:"spec"`
-	RunPolicy config.JobRunPolicy `bson:"run_policy"   yaml:"run_policy" json:"run_policy"`
+	Skipped        bool                     `bson:"skipped"        yaml:"skipped"    json:"skipped"`
+	Spec           interface{}              `bson:"spec"           yaml:"spec"       json:"spec"`
+	RunPolicy      config.JobRunPolicy      `bson:"run_policy"     yaml:"run_policy" json:"run_policy"`
+	ServiceModules []*WorkflowServiceModule `bson:"service_modules"                  json:"service_modules"`
+}
+
+type WorkflowServiceModule struct {
+	ServiceModule string              `bson:"service_module" json:"service_module"`
+	ServiceName   string              `bson:"service_name"   json:"service_name"`
+	CodeInfo      []*types.Repository `bson:"code_info"      json:"code_info"`
 }
 
 type CustomDeployJobSpec struct {
@@ -152,8 +236,9 @@ type CustomDeployJobSpec struct {
 
 type DeployTargets struct {
 	// workload_type/workload_name/container_name.
-	Target string `bson:"target"           json:"target"            yaml:"target"`
-	Image  string `bson:"image,omitempty"  json:"image,omitempty"   yaml:"image,omitempty"`
+	Target    string `bson:"target"           json:"target"            yaml:"target"`
+	Image     string `bson:"image,omitempty"  json:"image,omitempty"   yaml:"image,omitempty"`
+	ImageName string `bson:"image_name,omitempty"  json:"image_name,omitempty"   yaml:"image_name,omitempty"`
 }
 
 type PluginJobSpec struct {
@@ -170,14 +255,13 @@ type FreestyleJobSpec struct {
 type ZadigBuildJobSpec struct {
 	DockerRegistryID string             `bson:"docker_registry_id"     yaml:"docker_registry_id"     json:"docker_registry_id"`
 	ServiceAndBuilds []*ServiceAndBuild `bson:"service_and_builds"     yaml:"service_and_builds"     json:"service_and_builds"`
-	ServiceOptions   []*ServiceAndBuild `bson:"service_options"        yaml:"service_options"        json:"service_options"`
 }
 
 type ServiceAndBuild struct {
 	ServiceName      string              `bson:"service_name"        yaml:"service_name"     json:"service_name"`
 	ServiceModule    string              `bson:"service_module"      yaml:"service_module"   json:"service_module"`
 	BuildName        string              `bson:"build_name"          yaml:"build_name"       json:"build_name"`
-	Image            string              `bson:"-"                   yaml:"-"                json:"image"`
+	Image            string              `bson:"image"                   yaml:"-"                json:"image"`
 	ImageName        string              `bson:"image_name"                   yaml:"image_name"                json:"image_name"`
 	Package          string              `bson:"-"                   yaml:"-"                json:"package"`
 	KeyVals          []*KeyVal           `bson:"key_vals"            yaml:"key_vals"         json:"key_vals"`
@@ -201,12 +285,42 @@ type ZadigDeployJobSpec struct {
 	Services         []*DeployService   `bson:"services"             yaml:"services"             json:"services"`
 }
 
+type ZadigHelmChartDeployJobSpec struct {
+	Env                string             `bson:"env"                      yaml:"env"                         json:"env"`
+	EnvSource          string             `bson:"env_source"               yaml:"env_source"                  json:"env_source"`
+	SkipCheckRunStatus bool               `bson:"skip_check_run_status"    yaml:"skip_check_run_status"       json:"skip_check_run_status"`
+	DeployHelmCharts   []*DeployHelmChart `bson:"deploy_helm_charts"       yaml:"deploy_helm_charts"          json:"deploy_helm_charts"`
+}
+
+type DeployHelmChart struct {
+	ReleaseName  string `bson:"release_name"          yaml:"release_name"             json:"release_name"`
+	ChartRepo    string `bson:"chart_repo"            yaml:"chart_repo"               json:"chart_repo"`
+	ChartName    string `bson:"chart_name"            yaml:"chart_name"               json:"chart_name"`
+	ChartVersion string `bson:"chart_version"         yaml:"chart_version"            json:"chart_version"`
+	ValuesYaml   string `bson:"values_yaml"           yaml:"values_yaml"              json:"values_yaml"`
+}
+
 type DeployService struct {
-	ServiceName   string           `bson:"service_name"        yaml:"service_name"     json:"service_name"`
-	KeyVals       []*ServiceKeyVal `bson:"key_vals"            yaml:"key_vals"         json:"key_vals"`
+	ServiceName string `bson:"service_name"        yaml:"service_name"     json:"service_name"`
+	// VariableConfigs added since 1.18
+	VariableConfigs []*DeplopyVariableConfig `bson:"variable_configs"                 json:"variable_configs"                    yaml:"variable_configs"`
+	// VariableKVs added since 1.18
+	VariableKVs []*commontypes.RenderVariableKV `bson:"variable_kvs"       yaml:"variable_kvs"    json:"variable_kvs"`
+	// LatestVariableKVs added since 1.18
+	LatestVariableKVs []*commontypes.RenderVariableKV `bson:"latest_variable_kvs"       yaml:"latest_variable_kvs"    json:"latest_variable_kvs"`
+	// VariableYaml added since 1.18, used for helm production environments
+	VariableYaml string `bson:"variable_yaml" yaml:"variable_yaml" json:"variable_yaml"`
+	// KeyVals Deprecated since 1.18
+	KeyVals []*ServiceKeyVal `bson:"key_vals"            yaml:"key_vals"         json:"key_vals"`
+	// LatestKeyVals Deprecated since 1.18
 	LatestKeyVals []*ServiceKeyVal `bson:"latest_key_vals"     yaml:"latest_key_vals"  json:"latest_key_vals"`
 	UpdateConfig  bool             `bson:"update_config"       yaml:"update_config"    json:"update_config"`
 	Updatable     bool             `bson:"updatable"           yaml:"updatable"        json:"updatable"`
+}
+
+type DeplopyVariableConfig struct {
+	VariableKey       string `bson:"variable_key"                     json:"variable_key"                        yaml:"variable_key"`
+	UseGlobalVariable bool   `bson:"use_global_variable"              json:"use_global_variable"                 yaml:"use_global_variable"`
 }
 
 type ServiceKeyVal struct {
@@ -232,10 +346,13 @@ type ZadigDistributeImageJobSpec struct {
 	// not required when source is fromjob, directly obtained from upstream build job information
 	SourceRegistryID string              `bson:"source_registry_id"             json:"source_registry_id"            yaml:"source_registry_id"`
 	TargetRegistryID string              `bson:"target_registry_id"             json:"target_registry_id"            yaml:"target_registry_id"`
-	Tatgets          []*DistributeTarget `bson:"targets"                        json:"targets"                       yaml:"targets"`
+	Targets          []*DistributeTarget `bson:"targets"                        json:"targets"                       yaml:"targets"`
 	// unit is minute.
-	Timeout   int64  `bson:"timeout"                        json:"timeout"                       yaml:"timeout"`
-	ClusterID string `bson:"cluster_id"                     json:"cluster_id"                    yaml:"cluster_id"`
+	Timeout                  int64  `bson:"timeout"                        json:"timeout"                       yaml:"timeout"`
+	ClusterID                string `bson:"cluster_id"                     json:"cluster_id"                    yaml:"cluster_id"`
+	StrategyID               string `bson:"strategy_id"                    json:"strategy_id"                   yaml:"strategy_id"`
+	EnableTargetImageTagRule bool   `bson:"enable_target_image_tag_rule" json:"enable_target_image_tag_rule" yaml:"enable_target_image_tag_rule"`
+	TargetImageTagRule       string `bson:"target_image_tag_rule"        json:"target_image_tag_rule"        yaml:"target_image_tag_rule"`
 }
 
 type DistributeTarget struct {
@@ -297,7 +414,41 @@ type BlueGreenDeployJobSpec struct {
 	Targets          []*BlueGreenTarget `bson:"targets"                json:"targets"               yaml:"targets"`
 }
 
+type BlueGreenDeployV2JobSpec struct {
+	Version    string                      `bson:"version"               json:"version"              yaml:"version"`
+	Production bool                        `bson:"production"               json:"production"              yaml:"production"`
+	Env        string                      `bson:"env"               json:"env"              yaml:"env"`
+	Source     string                      `bson:"source"               json:"source"              yaml:"source"`
+	Services   []*BlueGreenDeployV2Service `bson:"services" json:"services" yaml:"services"`
+}
+
+type BlueGreenDeployV2ServiceModuleAndImage struct {
+	ServiceModule string `bson:"service_module" json:"service_module" yaml:"service_module"`
+	Image         string `bson:"image"          json:"image"          yaml:"image"`
+	// Following fields only save for frontend
+	ImageName   string `bson:"image_name"     json:"image_name"     yaml:"image_name"`
+	Name        string `bson:"name"           json:"name"           yaml:"name"`
+	ServiceName string `bson:"service_name"   json:"service_name"   yaml:"service_name"`
+	Value       string `bson:"value"          json:"value"          yaml:"value"`
+}
+
+type BlueGreenDeployV2Service struct {
+	// ServiceName is zadig service name
+	ServiceName         string                                    `bson:"service_name" json:"service_name" yaml:"service_name"`
+	BlueServiceYaml     string                                    `bson:"blue_service_yaml" json:"blue_service_yaml" yaml:"blue_service_yaml"`
+	BlueServiceName     string                                    `bson:"blue_service_name,omitempty" json:"blue_service_name,omitempty" yaml:"blue_service_name,omitempty"`
+	BlueDeploymentYaml  string                                    `bson:"blue_deployment_yaml,omitempty" json:"blue_deployment_yaml,omitempty" yaml:"blue_deployment_yaml,omitempty"`
+	BlueDeploymentName  string                                    `bson:"blue_deployment_name,omitempty" json:"blue_deployment_name,omitempty" yaml:"blue_deployment_name,omitempty"`
+	GreenDeploymentName string                                    `bson:"green_deployment_name,omitempty" json:"green_deployment_name,omitempty" yaml:"green_deployment_name,omitempty"`
+	GreenServiceName    string                                    `bson:"green_service_name,omitempty" json:"green_service_name,omitempty" yaml:"green_service_name,omitempty"`
+	ServiceAndImage     []*BlueGreenDeployV2ServiceModuleAndImage `bson:"service_and_image" json:"service_and_image" yaml:"service_and_image"`
+}
+
 type BlueGreenReleaseJobSpec struct {
+	FromJob string `bson:"from_job"               json:"from_job"              yaml:"from_job"`
+}
+
+type BlueGreenReleaseV2JobSpec struct {
 	FromJob string `bson:"from_job"               json:"from_job"              yaml:"from_job"`
 }
 
@@ -390,7 +541,15 @@ type GrayRollbackTarget struct {
 }
 
 type JiraJobSpec struct {
-	ProjectID    string     `bson:"project_id"  json:"project_id"  yaml:"project_id"`
+	ProjectID          string `bson:"project_id"  json:"project_id"  yaml:"project_id"`
+	JiraID             string `bson:"jira_id" json:"jira_id" yaml:"jira_id"`
+	JiraSystemIdentity string `bson:"jira_system_identity" json:"jira_system_identity" yaml:"jira_system_identity"`
+	JiraURL            string `bson:"jira_url" json:"jira_url" yaml:"jira_url"`
+	// QueryType: "" means common, "advanced" means use custom jql
+	QueryType string `bson:"query_type" json:"query_type" yaml:"query_type"`
+	// JQL: when query type is advanced, use this
+	JQL string `bson:"jql" json:"jql" yaml:"jql"`
+
 	IssueType    string     `bson:"issue_type"  json:"issue_type"  yaml:"issue_type"`
 	Issues       []*IssueID `bson:"issues" json:"issues" yaml:"issues"`
 	TargetStatus string     `bson:"target_status" json:"target_status" yaml:"target_status"`
@@ -416,28 +575,40 @@ type IstioRollBackJobSpec struct {
 	Targets   []*IstioJobTarget `bson:"targets"     json:"targets"     yaml:"targets"`
 }
 
+type SQLJobSpec struct {
+	// ID db instance id
+	ID     string                `bson:"id" json:"id" yaml:"id"`
+	Type   config.DBInstanceType `bson:"type" json:"type" yaml:"type"`
+	SQL    string                `bson:"sql" json:"sql" yaml:"sql"`
+	Source string                `bson:"source" json:"source" yaml:"source"`
+}
+
 type ApolloJobSpec struct {
 	ApolloID      string             `bson:"apolloID" json:"apolloID" yaml:"apolloID"`
 	NamespaceList []*ApolloNamespace `bson:"namespaceList" json:"namespaceList" yaml:"namespaceList"`
 }
 
 type ApolloNamespace struct {
-	AppID      string      `bson:"appID" json:"appID" yaml:"appID"`
-	ClusterID  string      `bson:"clusterID" json:"clusterID" yaml:"clusterID"`
-	Env        string      `bson:"env" json:"env" yaml:"env"`
-	Namespace  string      `bson:"namespace" json:"namespace" yaml:"namespace"`
-	Type       string      `bson:"type" json:"type" yaml:"type"`
-	KeyValList []*ApolloKV `bson:"kv" json:"kv" yaml:"kv"`
+	AppID          string      `bson:"appID"             json:"appID"                       yaml:"appID"`
+	ClusterID      string      `bson:"clusterID"         json:"clusterID"                   yaml:"clusterID"`
+	Env            string      `bson:"env"               json:"env"                         yaml:"env"`
+	Namespace      string      `bson:"namespace"         json:"namespace"                   yaml:"namespace"`
+	Type           string      `bson:"type"              json:"type"                        yaml:"type"`
+	OriginalConfig []*ApolloKV `bson:"original_config"   json:"original_config,omitempty"   yaml:"original_config"`
+	KeyValList     []*ApolloKV `bson:"kv"                json:"kv"                          yaml:"kv"`
 }
 
 type MeegoTransitionJobSpec struct {
-	Source          string                     `bson:"source"             json:"source"`
-	ProjectKey      string                     `bson:"project_key"        json:"project_key"        yaml:"project_key"`
-	ProjectName     string                     `bson:"project_name"       json:"project_name"       yaml:"project_name"`
-	WorkItemType    string                     `bson:"work_item_type"     json:"work_item_type"     yaml:"work_item_type"`
-	WorkItemTypeKey string                     `bson:"work_item_type_key" json:"work_item_type_key" yaml:"work_item_type_key"`
-	Link            string                     `bson:"link"               json:"link"               yaml:"link"`
-	WorkItems       []*MeegoWorkItemTransition `bson:"work_items"         json:"work_items"         yaml:"work_items"`
+	Source              string                     `bson:"source"                json:"source"`
+	ProjectKey          string                     `bson:"project_key"           json:"project_key"           yaml:"project_key"`
+	ProjectName         string                     `bson:"project_name"          json:"project_name"          yaml:"project_name"`
+	MeegoID             string                     `bson:"meego_id"              json:"meego_id"              yaml:"meego_id"`
+	MeegoSystemIdentity string                     `bson:"meego_system_identity" json:"meego_system_identity" yaml:"meego_system_identity"`
+	MeegoURL            string                     `bson:"meego_url"             json:"meego_url"             yaml:"meego_url"`
+	WorkItemType        string                     `bson:"work_item_type"        json:"work_item_type"        yaml:"work_item_type"`
+	WorkItemTypeKey     string                     `bson:"work_item_type_key"    json:"work_item_type_key"    yaml:"work_item_type_key"`
+	Link                string                     `bson:"link"                  json:"link"                  yaml:"link"`
+	WorkItems           []*MeegoWorkItemTransition `bson:"work_items"            json:"work_items"            yaml:"work_items"`
 }
 
 type MeegoWorkItemTransition struct {
@@ -457,6 +628,93 @@ type IstioJobTarget struct {
 	Image              string `bson:"image"                     json:"image"                     yaml:"image,omitempty"`
 	CurrentReplica     int    `bson:"current_replica,omitempty" json:"current_replica,omitempty" yaml:"current_replica,omitempty"`
 	TargetReplica      int    `bson:"target_replica,omitempty"  json:"target_replica,omitempty"  yaml:"target_replica,omitempty"`
+}
+
+type GrafanaJobSpec struct {
+	ID   string `bson:"id" json:"id" yaml:"id"`
+	Name string `bson:"name" json:"name" yaml:"name"`
+	// CheckTime minute
+	CheckTime int64           `bson:"check_time" json:"check_time" yaml:"check_time"`
+	CheckMode string          `bson:"check_mode" json:"check_mode" yaml:"check_mode"`
+	Alerts    []*GrafanaAlert `bson:"alerts" json:"alerts" yaml:"alerts"`
+}
+
+type GrafanaAlert struct {
+	ID     string `bson:"id" json:"id" yaml:"id"`
+	Name   string `bson:"name" json:"name" yaml:"name"`
+	Status string `bson:"status,omitempty" json:"status,omitempty" yaml:"status,omitempty"`
+	Url    string `bson:"url,omitempty" json:"url,omitempty" yaml:"url,omitempty"`
+}
+
+type GuanceyunCheckJobSpec struct {
+	ID   string `bson:"id" json:"id" yaml:"id"`
+	Name string `bson:"name" json:"name" yaml:"name"`
+	// CheckTime minute
+	CheckTime int64               `bson:"check_time" json:"check_time" yaml:"check_time"`
+	CheckMode string              `bson:"check_mode" json:"check_mode" yaml:"check_mode"`
+	Monitors  []*GuanceyunMonitor `bson:"monitors" json:"monitors" yaml:"monitors"`
+}
+
+type GuanceyunMonitor struct {
+	ID   string `bson:"id" json:"id" yaml:"id"`
+	Name string `bson:"name" json:"name" yaml:"name"`
+	// Level is the lowest level to trigger alarm
+	Level  guanceyun.Level `bson:"level" json:"level" yaml:"level"`
+	Status string          `bson:"status,omitempty" json:"status,omitempty" yaml:"status,omitempty"`
+	Url    string          `bson:"url,omitempty" json:"url,omitempty" yaml:"url,omitempty"`
+}
+
+type JenkinsJobSpec struct {
+	ID   string            `bson:"id" json:"id" yaml:"id"`
+	Jobs []*JenkinsJobInfo `bson:"jobs" json:"jobs" yaml:"jobs"`
+}
+
+type JenkinsJobInfo struct {
+	JobName    string                 `bson:"job_name" json:"job_name" yaml:"job_name"`
+	Parameters []*JenkinsJobParameter `bson:"parameters" json:"parameters" yaml:"parameters"`
+}
+
+type JenkinsJobParameter struct {
+	Name    string           `bson:"name" json:"name" yaml:"name"`
+	Value   string           `bson:"value" json:"value" yaml:"value"`
+	Type    config.ParamType `bson:"type" json:"type" yaml:"type"`
+	Choices []string         `bson:"choices,omitempty" json:"choices,omitempty" yaml:"choices,omitempty"`
+	Source  string           `bson:"source" json:"source" yaml:"source"`
+}
+
+type MseGrayReleaseJobSpec struct {
+	Production         bool                     `bson:"production" json:"production" yaml:"production"`
+	GrayTag            string                   `bson:"gray_tag" json:"gray_tag" yaml:"gray_tag"`
+	BaseEnv            string                   `bson:"base_env" json:"base_env" yaml:"base_env"`
+	GrayEnv            string                   `bson:"gray_env" json:"gray_env" yaml:"gray_env"`
+	GrayEnvSource      string                   `bson:"gray_env_source" json:"gray_env_source" yaml:"gray_env_source"`
+	DockerRegistryID   string                   `bson:"docker_registry_id" json:"docker_registry_id" yaml:"docker_registry_id"`
+	SkipCheckRunStatus bool                     `bson:"skip_check_run_status" json:"skip_check_run_status" yaml:"skip_check_run_status"`
+	GrayServices       []*MseGrayReleaseService `bson:"gray_services" json:"gray_services" yaml:"gray_services"`
+}
+
+type MseGrayReleaseService struct {
+	ServiceName     string                                 `bson:"service_name" json:"service_name" yaml:"service_name"`
+	Replicas        int                                    `bson:"replicas"     json:"replicas"     yaml:"replicas"`
+	YamlContent     string                                 `bson:"yaml" json:"yaml" yaml:"yaml"`
+	ServiceAndImage []*MseGrayReleaseServiceModuleAndImage `bson:"service_and_image" json:"service_and_image" yaml:"service_and_image"`
+}
+
+type MseGrayReleaseServiceModuleAndImage struct {
+	ServiceModule string `bson:"service_module" json:"service_module" yaml:"service_module"`
+	Image         string `bson:"image"          json:"image"          yaml:"image"`
+	// Following fields only save for frontend
+	ImageName   string `bson:"image_name"     json:"image_name"     yaml:"image_name"`
+	Name        string `bson:"name"           json:"name"           yaml:"name"`
+	ServiceName string `bson:"service_name"   json:"service_name"   yaml:"service_name"`
+	Value       string `bson:"value"          json:"value"          yaml:"value"`
+}
+
+type MseGrayOfflineJobSpec struct {
+	Env        string `bson:"env" json:"env" yaml:"env"`
+	Source     string `bson:"source" json:"source" yaml:"source"`
+	GrayTag    string `bson:"gray_tag" json:"gray_tag" yaml:"gray_tag"`
+	Production bool   `bson:"production" json:"production" yaml:"production"`
 }
 
 type NacosJobSpec struct {
@@ -506,7 +764,10 @@ type JobProperties struct {
 	Retry           int64               `bson:"retry"                  json:"retry"                 yaml:"retry"`
 	ResourceRequest setting.Request     `bson:"res_req"                json:"res_req"               yaml:"res_req"`
 	ResReqSpec      setting.RequestSpec `bson:"res_req_spec"           json:"res_req_spec"          yaml:"res_req_spec"`
+	Infrastructure  string              `bson:"infrastructure"         json:"infrastructure"        yaml:"infrastructure"`
+	VMLabels        []string            `bson:"vm_labels"              json:"vm_labels"             yaml:"vm_labels"`
 	ClusterID       string              `bson:"cluster_id"             json:"cluster_id"            yaml:"cluster_id"`
+	StrategyID      string              `bson:"strategy_id"            json:"strategy_id"           yaml:"strategy_id"`
 	BuildOS         string              `bson:"build_os"               json:"build_os"              yaml:"build_os,omitempty"`
 	ImageFrom       string              `bson:"image_from"             json:"image_from"            yaml:"image_from,omitempty"`
 	ImageID         string              `bson:"image_id"               json:"image_id"              yaml:"image_id,omitempty"`
@@ -548,6 +809,7 @@ type WorkflowV4Hook struct {
 	MainRepo            *MainHookRepo       `bson:"main_repo"                 json:"main_repo"`
 	Description         string              `bson:"description,omitempty"     json:"description,omitempty"`
 	Repos               []*types.Repository `bson:"-"                         json:"repos,omitempty"`
+	IsManual            bool                `bson:"is_manual"                 json:"is_manual"`
 	WorkflowArg         *WorkflowV4         `bson:"workflow_arg"              json:"workflow_arg"`
 }
 
@@ -559,10 +821,13 @@ type JiraHook struct {
 }
 
 type MeegoHook struct {
-	Name        string      `bson:"name" json:"name"`
-	Enabled     bool        `bson:"enabled" json:"enabled"`
-	Description string      `bson:"description" json:"description"`
-	WorkflowArg *WorkflowV4 `bson:"workflow_arg" json:"workflow_arg"`
+	Name                string      `bson:"name" json:"name"`
+	MeegoID             string      `bson:"meego_id" json:"meego_id"`
+	MeegoSystemIdentity string      `bson:"meego_system_identity" json:"meego_system_identity"`
+	MeegoURL            string      `bson:"meego_url"             json:"meego_url"`
+	Enabled             bool        `bson:"enabled" json:"enabled"`
+	Description         string      `bson:"description" json:"description"`
+	WorkflowArg         *WorkflowV4 `bson:"workflow_arg" json:"workflow_arg"`
 }
 
 type GeneralHook struct {
@@ -602,6 +867,15 @@ type StorageDetail struct {
 	MountPath string           `bson:"mount_path"       json:"mount_path"       yaml:"mount_path"`
 }
 
+type TestStatsInProperties struct {
+	RunningJobName string  `bson:"running_job_name" json:"running_job_name"`
+	Type           string  `bson:"type" json:"type"`
+	TestName       string  `bson:"name" json:"name"`
+	TestCaseNum    int     `bson:"total_case_num" json:"total_case_num"`
+	SuccessCaseNum int     `bson:"success_case_num" json:"success_case_num"`
+	TestTime       float64 `bson:"time" json:"time"`
+}
+
 func IToiYaml(before interface{}, after interface{}) error {
 	b, err := yaml.Marshal(before)
 	if err != nil {
@@ -616,4 +890,17 @@ func IToiYaml(before interface{}, after interface{}) error {
 
 func (WorkflowV4) TableName() string {
 	return "workflow_v4"
+}
+
+// CustomField use to display custom field of workflow history tasks
+type CustomField struct {
+	TaskID                 int            `bson:"task_id"                             json:"task_id"`
+	Status                 int            `bson:"status"                              json:"status"`
+	Duration               int            `bson:"duration"                            json:"duration"`
+	Executor               int            `bson:"executor"                            json:"executor"`
+	BuildServiceComponent  map[string]int `bson:"build_service_component,omitempty"   json:"build_service_component,omitempty"`
+	BuildCodeMsg           map[string]int `bson:"build_code_msg,omitempty"            json:"build_code_msg,omitempty"`
+	DeployServiceComponent map[string]int `bson:"deploy_service_component,omitempty"  json:"deploy_service_component,omitempty"`
+	DeployEnv              map[string]int `bson:"deploy_env,omitempty"                json:"deploy_env,omitempty"`
+	TestResult             map[string]int `bson:"test_result,omitempty"               json:"test_result,omitempty"`
 }

@@ -18,12 +18,16 @@ package util
 
 import (
 	"fmt"
+	"io/fs"
+	"path/filepath"
 	"strings"
 
-	"github.com/koderover/zadig/pkg/util/converter"
-	"gopkg.in/yaml.v2"
-	"k8s.io/apimachinery/pkg/util/sets"
+	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
 	"k8s.io/helm/pkg/strvals"
+
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/util/converter"
 )
 
 func GeneReleaseName(namingRule, projectName, namespace, envName, service string) string {
@@ -35,7 +39,7 @@ func GeneReleaseName(namingRule, projectName, namespace, envName, service string
 }
 
 // for keys exist in both yaml, current values will override the latest values
-func OverrideValues(currentValuesYaml, latestValuesYaml []byte, imageRelatedKey sets.String, onlyImages bool) ([]byte, error) {
+func OverrideValues(currentValuesYaml, latestValuesYaml []byte) ([]byte, error) {
 	currentValuesMap := map[string]interface{}{}
 	if err := yaml.Unmarshal(currentValuesYaml, &currentValuesMap); err != nil {
 		return nil, err
@@ -58,9 +62,6 @@ func OverrideValues(currentValuesYaml, latestValuesYaml []byte, imageRelatedKey 
 
 	replaceMap := make(map[string]interface{})
 	for key := range latestValuesFlatMap {
-		if onlyImages && !imageRelatedKey.Has(key) {
-			continue
-		}
 		if currentValue, ok := currentValuesFlatMap[key]; ok {
 			replaceMap[key] = currentValue
 		}
@@ -80,4 +81,22 @@ func OverrideValues(currentValuesYaml, latestValuesYaml []byte, imageRelatedKey 
 	}
 
 	return yaml.Marshal(latestValuesMap)
+}
+
+func ReadValuesYAML(chartTree fs.FS, base string, logger *zap.SugaredLogger) ([]byte, error) {
+	content, err := fs.ReadFile(chartTree, filepath.Join(base, setting.ValuesYaml))
+	if err != nil {
+		logger.Errorf("Failed to read %s, err: %s", setting.ValuesYaml, err)
+		return nil, err
+	}
+	return content, nil
+}
+
+func ReadValuesYAMLFromLocal(base string, logger *zap.SugaredLogger) ([]byte, error) {
+	content, err := ReadFile(filepath.Join(base, setting.ValuesYaml))
+	if err != nil {
+		logger.Errorf("Failed to read %s, err: %s", setting.ValuesYaml, err)
+		return nil, err
+	}
+	return content, nil
 }

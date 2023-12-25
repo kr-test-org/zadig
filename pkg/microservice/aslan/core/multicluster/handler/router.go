@@ -38,6 +38,7 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		Cluster.POST("", CreateCluster)
 		Cluster.PUT("/:id", UpdateCluster)
 		Cluster.DELETE("/:id", DeleteCluster)
+		Cluster.GET("/:id/strategy/references", GetClusterStrategyReferences)
 		Cluster.PUT("/:id/disconnect", DisconnectCluster)
 		Cluster.PUT("/:id/reconnect", ReconnectCluster)
 	}
@@ -57,5 +58,5 @@ func (*Router) Inject(router *gin.RouterGroup) {
 	router.GET("/:id/:namespace/deployments", ListDeployments)
 	router.GET("/:id/:namespace/istio/virtualservices", ListIstioVirtualServices)
 
-	router.GET("/:id/check/ephemeralcontainers", CheckEphemeralContainers)
+	router.GET("/check/ephemeralcontainers", CheckEphemeralContainers)
 }

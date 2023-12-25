@@ -19,13 +19,15 @@ package job
 import (
 	"fmt"
 
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/util"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/types"
 )
 
 type WorkflowTriggerJob struct {
@@ -117,7 +119,7 @@ func (j *WorkflowTriggerJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, erro
 	default:
 		return nil, errors.Errorf("invalid trigger type: %s", j.spec.TriggerType)
 	}
-	
+
 	for _, event := range workflowTriggerEvents {
 		for _, param := range event.Params {
 			j.getRepoFromJob(param)
@@ -204,7 +206,7 @@ func (j *WorkflowTriggerJob) getSourceJobTargets(jobName string, m map[commonmod
 				if err := commonmodels.IToi(job.Spec, distributeSpec); err != nil {
 					return nil, err
 				}
-				for _, distribute := range distributeSpec.Tatgets {
+				for _, distribute := range distributeSpec.Targets {
 					if info, ok := m[commonmodels.ServiceNameAndModule{
 						ServiceName:   distribute.ServiceName,
 						ServiceModule: distribute.ServiceModule,
@@ -245,6 +247,10 @@ func (j *WorkflowTriggerJob) getSourceJobTargets(jobName string, m map[commonmod
 }
 
 func (j *WorkflowTriggerJob) LintJob() error {
+	if err := util.CheckZadigXLicenseStatus(); err != nil {
+		return e.ErrLicenseInvalid.AddDesc("")
+	}
+
 	j.spec = &commonmodels.WorkflowTriggerJobSpec{}
 	if err := commonmodels.IToiYaml(j.job.Spec, j.spec); err != nil {
 		return err

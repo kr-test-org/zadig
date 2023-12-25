@@ -20,9 +20,9 @@ import (
 	"errors"
 	"regexp"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/util"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/util"
 )
 
 type OpenAPICreateProductReq struct {
@@ -69,12 +69,54 @@ type ServiceDefinition struct {
 	VariableYaml util.KVInput `json:"variable_yaml"`
 	AutoSync     bool         `json:"auto_sync"`
 	Yaml         string       `json:"yaml"`
+	ValuesYaml   string       `json:"values_yaml"`
 }
 
 type EnvDefinition struct {
-	EnvName     string `json:"env_name"`
+	EnvName     string `json:"env_key"`
 	ClusterName string `json:"cluster_name"`
 	Namespace   string `json:"namespace"`
+}
+
+type OpenAPIListProjectReq struct {
+	PageSize int64 `json:"pageSize" form:"pageSize,default=20"`
+	PageNum  int64 `json:"pageNum"  form:"pageNum,default=1"`
+}
+
+type OpenAPIProjectDetailResp struct {
+	ProjectName string `json:"project_name"`
+	ProjectKey  string `json:"project_key"`
+	IsPublic    bool   `json:"is_public"`
+	Desc        string `json:"desc"`
+	DeployType  string `json:"deploy_type"`
+	CreateTime  int64  `json:"create_time"`
+	CreatedBy   string `json:"created_by"`
+}
+
+type OpenAPIProjectListResp struct {
+	Total    int             `json:"total"`
+	Projects []*ProjectBrief `json:"projects"`
+}
+
+type ProjectBrief struct {
+	ProjectName string `json:"project_name"`
+	ProjectKey  string `json:"project_key"`
+	Description string `json:"description"`
+	DeployType  string `json:"deploy_type"`
+}
+
+type EnvInfo struct {
+	Name       string `json:"name"`
+	Production bool   `json:"production"`
+	Status     string `json:"status"`
+}
+
+type Service struct {
+	Name       string `json:"name"`
+	CreatedBy  string `json:"created_by"`
+	CreateTime int64  `json:"create_time"`
+	Source     string `json:"source"`
+	Production bool   `json:"production"`
 }
 
 func (req OpenAPIInitializeProjectReq) Validate() error {
@@ -110,4 +152,31 @@ func (req OpenAPIInitializeProjectReq) Validate() error {
 	}
 
 	return nil
+}
+
+type ProjectGroupArgs struct {
+	GroupID     string   `json:"group_id"`
+	GroupName   string   `json:"group_name"`
+	ProjectKeys []string `json:"project_keys"`
+}
+
+func (args *ProjectGroupArgs) Validate() error {
+	if args.GroupName == "" {
+		return errors.New("group_name cannot be empty")
+	}
+
+	return nil
+}
+
+type ProjectGroupPreset struct {
+	GroupID   string                  `json:"group_id"`
+	GroupName string                  `json:"group_name"`
+	Projects  []*ProjectGroupRelation `json:"projects"`
+}
+
+type ProjectGroupRelation struct {
+	ProjectName string `json:"project_name"`
+	ProjectKey  string `json:"project_key"`
+	DeployType  string `json:"deploy_type"`
+	Enabled     bool   `json:"enabled"`
 }

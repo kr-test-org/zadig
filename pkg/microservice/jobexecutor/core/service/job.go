@@ -28,11 +28,12 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/koderover/zadig/pkg/microservice/jobexecutor/config"
-	"github.com/koderover/zadig/pkg/microservice/jobexecutor/core/service/meta"
-	"github.com/koderover/zadig/pkg/microservice/jobexecutor/core/service/step"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/types/job"
+	"github.com/koderover/zadig/v2/pkg/microservice/jobexecutor/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/jobexecutor/core/service/configmap"
+	"github.com/koderover/zadig/v2/pkg/microservice/jobexecutor/core/service/meta"
+	"github.com/koderover/zadig/v2/pkg/microservice/jobexecutor/core/service/step"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/types/job"
 )
 
 type Job struct {
@@ -41,6 +42,7 @@ type Job struct {
 	ActiveWorkspace  string
 	UserEnvs         map[string]string
 	OutputsJsonBytes []byte
+	ConfigMapUpdater configmap.Updater
 }
 
 const (
@@ -109,12 +111,13 @@ func (j *Job) EnsureActiveWorkspace(workspace string) error {
 }
 
 func (j *Job) getUserEnvs() []string {
-	envs := []string{
+	envs := os.Environ()
+	envs = append(envs,
 		"CI=true",
 		"ZADIG=true",
 		fmt.Sprintf("HOME=%s", config.Home()),
 		fmt.Sprintf("WORKSPACE=%s", j.ActiveWorkspace),
-	}
+	)
 
 	j.Ctx.Paths = strings.Replace(j.Ctx.Paths, "$HOME", config.Home(), -1)
 	envs = append(envs, fmt.Sprintf("PATH=%s", j.Ctx.Paths))
@@ -143,7 +146,7 @@ func (j *Job) Run(ctx context.Context) error {
 		if hasFailed && !stepInfo.Onfailure {
 			continue
 		}
-		if err := step.RunStep(ctx, stepInfo, j.ActiveWorkspace, j.Ctx.Paths, j.getUserEnvs(), j.Ctx.SecretEnvs); err != nil {
+		if err := step.RunStep(ctx, stepInfo, j.ActiveWorkspace, j.Ctx.Paths, j.getUserEnvs(), j.Ctx.SecretEnvs, j.ConfigMapUpdater); err != nil {
 			hasFailed = true
 			respErr = err
 		}

@@ -21,8 +21,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/pkg/errors"
@@ -32,28 +34,30 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
-	configbase "github.com/koderover/zadig/pkg/config"
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/collaboration/repository/mongodb"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/collaboration/service"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models/template"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	templaterepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb/template"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/collaboration"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/render"
-	environmentservice "github.com/koderover/zadig/pkg/microservice/aslan/core/environment/service"
-	service2 "github.com/koderover/zadig/pkg/microservice/aslan/core/label/service"
-	workflowservice "github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/workflow"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/shared/client/policy"
-	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	"github.com/koderover/zadig/pkg/tool/kube/getter"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/types"
-	"github.com/koderover/zadig/pkg/util"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/collaboration/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/collaboration/service"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models/template"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	templaterepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb/template"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/collaboration"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/kube"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/render"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/repository"
+	commontypes "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/types"
+	commonutil "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/util"
+	environmentservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/environment/service"
+	service2 "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/label/service"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/shared/client/user"
+	kubeclient "github.com/koderover/zadig/v2/pkg/shared/kube/client"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/getter"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/util"
 )
 
 type CustomParseDataArgs struct {
@@ -61,11 +65,12 @@ type CustomParseDataArgs struct {
 }
 
 type ImageParseData struct {
-	Repo     string `json:"repo,omitempty"`
-	Image    string `json:"image,omitempty"`
-	Tag      string `json:"tag,omitempty"`
-	InUse    bool   `json:"inUse,omitempty"`
-	PresetId int    `json:"presetId,omitempty"`
+	Repo      string `json:"repo,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	Image     string `json:"image,omitempty"`
+	Tag       string `json:"tag,omitempty"`
+	InUse     bool   `json:"inUse,omitempty"`
+	PresetId  int    `json:"presetId,omitempty"`
 }
 
 func GetProductTemplateServices(productName string, envType types.EnvType, isBaseEnv bool, baseEnvName string, log *zap.SugaredLogger) (*template.Product, error) {
@@ -75,14 +80,8 @@ func GetProductTemplateServices(productName string, envType types.EnvType, isBas
 		return nil, e.ErrGetProduct.AddDesc(err.Error())
 	}
 
-	err = FillProductTemplateVars([]*template.Product{resp}, log)
-	if err != nil {
-		return nil, fmt.Errorf("FillProductTemplateVars err : %v", err)
-	}
-
-	if resp.Services == nil {
-		resp.Services = make([][]string, 0)
-	}
+	resp.Services = filterProductServices(productName, resp.Services, false)
+	resp.ProductionServices = filterProductServices(productName, resp.ProductionServices, true)
 
 	if envType == types.ShareEnv && !isBaseEnv {
 		// At this point the request is from the environment share.
@@ -95,6 +94,7 @@ func GetProductTemplateServices(productName string, envType types.EnvType, isBas
 	return resp, nil
 }
 
+// Deprecated
 func ListOpenSourceProduct(log *zap.SugaredLogger) ([]*template.Product, error) {
 	opt := &templaterepo.ProductListOpt{
 		IsOpensource: "true",
@@ -115,7 +115,7 @@ func CreateProductTemplate(args *template.Product, log *zap.SugaredLogger) (err 
 	// do not save vars
 	args.Vars = nil
 
-	err = render.ValidateKVs(kvs, args.AllServiceInfos(), log)
+	err = render.ValidateKVs(kvs, args.AllTestServiceInfos(), log)
 	if err != nil {
 		return e.ErrCreateProduct.AddDesc(err.Error())
 	}
@@ -145,21 +145,22 @@ func CreateProductTemplate(args *template.Product, log *zap.SugaredLogger) (err 
 		return e.ErrCreateProduct.AddDesc(err.Error())
 	}
 
-	// 创建一个默认的渲染集
-	err = render.CreateRenderSet(&commonmodels.RenderSet{
-		Name:        args.ProductName,
-		ProductTmpl: args.ProductName,
-		UpdateBy:    args.UpdateBy,
-		IsDefault:   true,
-		//KVs:         kvs,
-	}, log)
-
+	// after the project is created, create roles for it
+	// TODO: i can't think of a good way to make this full logic robust, anyone who sees this should try to fix it
+	err = user.New().InitializeProject(args.ProductName, args.Public, args.Admins)
 	if err != nil {
-		log.Errorf("ProductTmpl.Create error: %v", err)
-		// 创建渲染集失败，删除产品模板
-		return e.ErrCreateProduct.AddDesc(err.Error())
+		log.Errorf("failed to initialize project authorization info for project: %s, error: %s", args.ProductName, err)
+		return e.ErrCreateProduct.AddDesc(fmt.Sprintf("failed to initialize project authorization info for project: %s, error: %s", args.ProductName, err))
 	}
 
+	// add project to current project group
+	if args.GroupName != "" {
+		err = AddProject2CurrentGroup(args.GroupName, args.ProductName, args.ProjectName, args.UpdateBy, args.ProductFeature.DeployType)
+		if err != nil {
+			log.Errorf("failed to add project to current group, error: %v", err)
+			return e.ErrCreateProduct.AddErr(fmt.Errorf("create project successfully, but failed to add project to current group, please add the project %s to group %s manually, error: %v", args.ProductName, args.GroupName, err))
+		}
+	}
 	return
 }
 
@@ -238,7 +239,7 @@ func UpdateProductTemplate(name string, args *template.Product, log *zap.Sugared
 	kvs := args.Vars
 	args.Vars = nil
 
-	if err = render.ValidateKVs(kvs, args.AllServiceInfos(), log); err != nil {
+	if err = render.ValidateKVs(kvs, args.AllTestServiceInfos(), log); err != nil {
 		log.Warnf("ProductTmpl.Update ValidateKVs error: %v", err)
 	}
 
@@ -254,35 +255,12 @@ func UpdateProductTemplate(name string, args *template.Product, log *zap.Sugared
 	if args.ProductFeature != nil && args.ProductFeature.DeployType == setting.HelmDeployType {
 		return
 	}
-	// 更新默认的渲染集
-	if err = render.CreateRenderSet(&commonmodels.RenderSet{
-		Name:        args.ProductName,
-		ProductTmpl: args.ProductName,
-		UpdateBy:    args.UpdateBy,
-		IsDefault:   true,
-		//KVs:         kvs,
-	}, log); err != nil {
-		log.Warnf("ProductTmpl.Update CreateRenderSet error: %v", err)
-	}
 
-	for _, envVars := range args.EnvVars {
-		//创建环境变量
-		if err = render.CreateRenderSet(&commonmodels.RenderSet{
-			EnvName:     envVars.EnvName,
-			Name:        args.ProductName,
-			ProductTmpl: args.ProductName,
-			UpdateBy:    args.UpdateBy,
-			IsDefault:   false,
-			//KVs:         envVars.Vars,
-		}, log); err != nil {
-			log.Warnf("ProductTmpl.Update CreateRenderSet error: %v", err)
-		}
+	// update role-bindings in case the visibility changes
+	err = user.New().SetProjectVisibility(args.ProductName, args.Public)
+	if err != nil {
+		log.Errorf("failed to change project visibility, error: %s", err)
 	}
-
-	//// 更新子环境渲染集
-	//if err = commonservice.UpdateSubRenderSet(args.ProductName, kvs, log); err != nil {
-	//	log.Warnf("ProductTmpl.Update UpdateSubRenderSet error: %v", err)
-	//}
 
 	return nil
 }
@@ -362,6 +340,7 @@ func transferServices(user string, projectInfo *template.Product, logger *zap.Su
 
 // optimizeServiceYaml optimize the yaml content of service, it removes unnecessary runtime information from workload yamls
 // TODO this function should be deleted after we refactor the code about host-project
+// CronJob workload is not needed to be handled here since is not supported till version 1.18.0
 func optimizeServiceYaml(projectName string, serviceInfo []*commonmodels.Service) error {
 	svcMap := make(map[string]*commonmodels.Service)
 	svcSets := sets.NewString()
@@ -371,7 +350,7 @@ func optimizeServiceYaml(projectName string, serviceInfo []*commonmodels.Service
 	}
 
 	products, err := commonrepo.NewProductColl().List(&commonrepo.ProductListOptions{
-		Name: projectName,
+		Name:       projectName,
 		Production: util.GetBoolPointer(false),
 	})
 	if err != nil {
@@ -534,25 +513,6 @@ func transferProducts(user string, projectInfo *template.Product, templateServic
 
 	// build rendersets and services, set necessary attributes
 	for _, product := range products {
-		rendersetInfo := &commonmodels.RenderSet{
-			Name:        product.Namespace,
-			EnvName:     product.EnvName,
-			ProductTmpl: product.ProductName,
-			UpdateBy:    user,
-			IsDefault:   false,
-		}
-		err = render.ForceCreateReaderSet(rendersetInfo, logger)
-		if err != nil {
-			return nil, err
-		}
-
-		product.Render = &commonmodels.RenderInfo{
-			Name:        rendersetInfo.Name,
-			Revision:    rendersetInfo.Revision,
-			ProductTmpl: rendersetInfo.ProductTmpl,
-			Description: rendersetInfo.Description,
-		}
-
 		currentWorkloads, err := commonservice.ListWorkloadTemplate(projectInfo.ProductName, product.EnvName, logger)
 		if err != nil {
 			return nil, err
@@ -565,12 +525,17 @@ func transferProducts(user string, projectInfo *template.Product, templateServic
 			if !ok {
 				log.Errorf("failed to find service: %s in template", workload.Service)
 			}
+			resources, err := kube.ManifestToResource(svcTemplate.Yaml)
+			if err != nil {
+				log.Errorf("failed to load resources from manifest, error: %s", err)
+			}
 			productServices = append(productServices, &commonmodels.ProductService{
 				ServiceName: workload.Service,
 				ProductName: product.ProductName,
 				Type:        svcTemplate.Type,
 				Revision:    svcTemplate.Revision,
 				Containers:  svcTemplate.Containers,
+				Resources:   resources,
 			})
 		}
 		product.Services = [][]*commonmodels.ProductService{productServices}
@@ -588,11 +553,8 @@ func transferProducts(user string, projectInfo *template.Product, templateServic
 		}
 
 		// mark service as only import
-		if product.ServiceDeployStrategy == nil {
-			product.ServiceDeployStrategy = make(map[string]string)
-		}
 		for _, svc := range product.GetServiceMap() {
-			product.ServiceDeployStrategy[svc.ServiceName] = setting.ServiceDeployStrategyImport
+			product.ServiceDeployStrategy = commonutil.SetServiceDeployStrategyImport(product.ServiceDeployStrategy, svc.ServiceName)
 		}
 
 		product.Source = setting.SourceFromZadig
@@ -624,6 +586,7 @@ func UpdateProject(name string, args *template.Product, log *zap.SugaredLogger) 
 		return e.ErrInvalidParam.AddDesc(err.Error())
 	}
 
+	args.ProjectNamePinyin, args.ProjectNamePinyinFirstLetter = util.GetPinyinFromChinese(args.ProjectName)
 	err = templaterepo.NewProductColl().Update(name, args)
 	if err != nil {
 		log.Errorf("Project.Update error: %v", err)
@@ -706,23 +669,6 @@ func validateCommonRule(currentRule, ruleType, deliveryType string) error {
 
 // DeleteProductTemplate 删除产品模板
 func DeleteProductTemplate(userName, productName, requestID string, isDelete bool, log *zap.SugaredLogger) (err error) {
-	publicServices, err := commonrepo.NewServiceColl().ListMaxRevisions(&commonrepo.ServiceListOption{ProductName: productName, Visibility: setting.PublicService})
-	if err != nil {
-		log.Errorf("pre delete check failed, err: %s", err)
-		return e.ErrDeleteProduct.AddDesc(err.Error())
-	}
-
-	serviceToProject, err := commonservice.GetServiceInvolvedProjects(publicServices, productName)
-	if err != nil {
-		log.Errorf("pre delete check failed, err: %s", err)
-		return e.ErrDeleteProduct.AddDesc(err.Error())
-	}
-	for k, v := range serviceToProject {
-		if len(v) > 0 {
-			return e.ErrDeleteProduct.AddDesc(fmt.Sprintf("共享服务[%s]在项目%v中被引用，请解除引用后删除", k, v))
-		}
-	}
-
 	envs, _ := commonrepo.NewProductColl().List(&commonrepo.ProductListOptions{Name: productName})
 	for _, env := range envs {
 		if err = commonrepo.NewProductColl().UpdateStatus(env.EnvName, productName, setting.ProductStatusDeleting); err != nil {
@@ -731,29 +677,19 @@ func DeleteProductTemplate(userName, productName, requestID string, isDelete boo
 		}
 	}
 
-	if err = render.DeleteRenderSet(productName, log); err != nil {
-		log.Errorf("DeleteProductTemplate DeleteRenderSet err: %s", err)
+	if err = DeleteTestModules(productName, requestID, log); err != nil {
+		log.Errorf("DeleteProductTemplate Delete productName %s test err: %s", productName, err)
 		return err
 	}
 
-	if err = DeleteTestModules(productName, requestID, log); err != nil {
-		log.Errorf("DeleteProductTemplate Delete productName %s test err: %s", productName, err)
+	if err = DeleteScanningModules(productName, log); err != nil {
+		log.Errorf("DeleteProductTemplate Delete productName %s scannings err: %s", productName, err)
 		return err
 	}
 
 	// delete collaboration_mode and collaboration_instance
 	if err := DeleteCollabrationMode(productName, userName, log); err != nil {
 		log.Errorf("DeleteCollabrationMode err:%s", err)
-		return err
-	}
-
-	if err = DeletePolicy(productName, log); err != nil {
-		log.Errorf("DeletePolicy  productName %s  err: %s", productName, err)
-		return err
-	}
-
-	if err = DeleteLabels(productName, log); err != nil {
-		log.Errorf("DeleteLabels  productName %s  err: %s", productName, err)
 		return err
 	}
 
@@ -798,12 +734,19 @@ func DeleteProductTemplate(userName, productName, requestID string, isDelete boo
 		&commonrepo.ServiceListOption{ProductName: productName, Type: setting.K8SDeployType},
 	)
 
+	err = user.New().DeleteAllProjectRoles(productName)
+	if err != nil {
+		log.Errorf("delete all roles in namespace %s failed, error: %s", productName, err)
+		return err
+	}
+
 	//删除交付中心
 	//删除构建/删除测试/删除服务
 	//删除workflow和历史task
 	go func() {
 		_ = commonrepo.NewBuildColl().Delete("", productName)
 		_ = commonrepo.NewServiceColl().Delete("", "", productName, "", 0)
+		_ = commonrepo.NewProductionServiceColl().DeleteByProject(productName)
 		_ = commonservice.DeleteDeliveryInfos(productName, log)
 		_ = DeleteProductsAsync(userName, productName, requestID, isDelete, log)
 
@@ -845,169 +788,56 @@ func DeleteProductTemplate(userName, productName, requestID string, isDelete boo
 		}
 	}()
 
+	// delete project key in related project group
+	groups, err := commonrepo.NewProjectGroupColl().List()
+	for _, group := range groups {
+		projects := make([]*commonmodels.ProjectDetail, 0)
+		for _, project := range group.Projects {
+			if project.ProjectKey != productName {
+				projects = append(projects, project)
+			}
+		}
+		if len(projects) != len(group.Projects) {
+			group.Projects = projects
+			if err = commonrepo.NewProjectGroupColl().Update(group); err != nil {
+				log.Errorf("failed to update project group, error:%s", err)
+				return err
+			}
+			break
+		}
+	}
+
 	return nil
 }
 
-// ForkProduct Deprecated
-func ForkProduct(username, uid, requestID string, args *template.ForkProject, log *zap.SugaredLogger) error {
-
-	prodTmpl, err := templaterepo.NewProductColl().Find(args.ProductName)
+func filterProductServices(productName string, source [][]string, production bool) [][]string {
+	ret := make([][]string, 0)
+	if len(source) == 0 {
+		return ret
+	}
+	curServices, err := repository.ListMaxRevisionsServices(productName, production)
 	if err != nil {
-		errMsg := fmt.Sprintf("[ProductTmpl.Find] %s error: %v", args.ProductName, err)
-		log.Error(errMsg)
-		return e.ErrForkProduct.AddDesc(errMsg)
+		log.Errorf("failed to query template services for product %s, production: %v, error: %v", productName, production, err)
+		return source
 	}
 
-	prodTmpl.ChartInfos = args.ValuesYamls
-	// Load Service
-	var svcs [][]*commonmodels.ProductService
-	allServiceInfoMap := prodTmpl.AllServiceInfoMap()
-	for _, names := range prodTmpl.Services {
-		servicesResp := make([]*commonmodels.ProductService, 0)
+	validSvcSet := sets.NewString()
+	for _, svc := range curServices {
+		validSvcSet.Insert(svc.ServiceName)
+	}
 
-		for _, serviceName := range names {
-			opt := &commonrepo.ServiceFindOption{
-				ServiceName:   serviceName,
-				ProductName:   allServiceInfoMap[serviceName].Owner,
-				ExcludeStatus: setting.ProductStatusDeleting,
+	for _, svcGroup := range source {
+		validSvcs := make([]string, 0)
+		for _, svc := range svcGroup {
+			if validSvcSet.Has(svc) {
+				validSvcs = append(validSvcs, svc)
 			}
-
-			serviceTmpl, err := commonrepo.NewServiceColl().Find(opt)
-			if err != nil {
-				errMsg := fmt.Sprintf("[ServiceTmpl.List] %s error: %v", opt.ServiceName, err)
-				log.Error(errMsg)
-				return e.ErrForkProduct.AddDesc(errMsg)
-			}
-			serviceResp := &commonmodels.ProductService{
-				ServiceName: serviceTmpl.ServiceName,
-				ProductName: serviceTmpl.ProductName,
-				Type:        serviceTmpl.Type,
-				Revision:    serviceTmpl.Revision,
-			}
-			if serviceTmpl.Type == setting.HelmDeployType {
-				serviceResp.Containers = make([]*commonmodels.Container, 0)
-				for _, c := range serviceTmpl.Containers {
-					container := &commonmodels.Container{
-						Name:      c.Name,
-						Image:     c.Image,
-						ImagePath: c.ImagePath,
-						ImageName: util.GetImageNameFromContainerInfo(c.ImageName, c.Name),
-					}
-					serviceResp.Containers = append(serviceResp.Containers, container)
-				}
-			}
-			servicesResp = append(servicesResp, serviceResp)
 		}
-		svcs = append(svcs, servicesResp)
-	}
-
-	prod := commonmodels.Product{
-		ProductName:     prodTmpl.ProductName,
-		Revision:        prodTmpl.Revision,
-		IsPublic:        false,
-		EnvName:         args.EnvName,
-		Services:        svcs,
-		Source:          setting.HelmDeployType,
-		ServiceRenders:  prodTmpl.ChartInfos,
-		IsForkedProduct: true,
-	}
-
-	err = environmentservice.CreateProduct(username, requestID, &prod, log)
-	if err != nil {
-		_, messageMap := e.ErrorMessage(err)
-		if description, ok := messageMap["description"]; ok {
-			return e.ErrForkProduct.AddDesc(description.(string))
-		}
-		errMsg := fmt.Sprintf("Failed to create env in order to fork product, the error is: %+v", err)
-		log.Errorf(errMsg)
-		return e.ErrForkProduct.AddDesc(errMsg)
-	}
-
-	workflowPreset, err := workflowservice.PreSetWorkflow(args.ProductName, log)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to get workflow preset info, the error is: %+v", err)
-		log.Error(errMsg)
-		return e.ErrForkProduct.AddDesc(errMsg)
-	}
-
-	buildModule := []*commonmodels.BuildModule{}
-	artifactModule := []*commonmodels.ArtifactModule{}
-	for _, i := range workflowPreset {
-		buildModuleVer := "stable"
-		if len(i.BuildModuleVers) != 0 {
-			buildModuleVer = i.BuildModuleVers[0]
-		}
-		buildModule = append(buildModule, &commonmodels.BuildModule{
-			BuildModuleVer: buildModuleVer,
-			Target:         i.Target,
-		})
-		artifactModule = append(artifactModule, &commonmodels.ArtifactModule{Target: i.Target})
-	}
-
-	workflowArgs := &commonmodels.Workflow{
-		ArtifactStage:   &commonmodels.ArtifactStage{Enabled: true, Modules: artifactModule},
-		BuildStage:      &commonmodels.BuildStage{Enabled: false, Modules: buildModule},
-		Name:            args.WorkflowName,
-		ProductTmplName: args.ProductName,
-		Enabled:         true,
-		EnvName:         args.EnvName,
-		TestStage:       &commonmodels.TestStage{Enabled: false, Tests: []*commonmodels.TestExecArgs{}},
-		SecurityStage:   &commonmodels.SecurityStage{Enabled: false},
-		DistributeStage: &commonmodels.DistributeStage{
-			Enabled:     false,
-			Distributes: []*commonmodels.ProductDistribute{},
-			Releases:    []commonmodels.RepoImage{},
-		},
-		HookCtl:   &commonmodels.WorkflowHookCtrl{Enabled: false, Items: []*commonmodels.WorkflowHook{}},
-		Schedules: &commonmodels.ScheduleCtrl{Enabled: false, Items: []*commonmodels.Schedule{}},
-		CreateBy:  username,
-		UpdateBy:  username,
-	}
-	err = policy.NewDefault().CreateOrUpdateRoleBinding(args.ProductName, &policy.RoleBinding{
-		UID:    uid,
-		Role:   string(setting.Contributor),
-		Preset: true,
-	})
-	if err != nil {
-		log.Errorf("Failed to create or update roleBinding, err: %s", err)
-		return e.ErrForkProduct
-	}
-
-	return workflowservice.CreateWorkflow(workflowArgs, log)
-}
-
-func UnForkProduct(userID string, username, productName, workflowName, envName, requestID string, log *zap.SugaredLogger) error {
-	if _, err := workflowservice.FindWorkflow(workflowName, log); err == nil {
-		err = commonservice.DeleteWorkflow(workflowName, requestID, false, log)
-		if err != nil {
-			log.Errorf("Failed to delete forked workflow: %s, the error is: %+v", workflowName, err)
-			return e.ErrUnForkProduct.AddDesc(err.Error())
+		if len(validSvcs) > 0 {
+			ret = append(ret, validSvcs)
 		}
 	}
-
-	policyClient := policy.NewDefault()
-	err := policyClient.DeleteRoleBinding(configbase.RoleBindingNameFromUIDAndRole(userID, setting.Contributor, ""), productName)
-	if err != nil {
-		log.Errorf("Failed to delete roleBinding, err: %s", err)
-		return e.ErrForkProduct
-	}
-	if err := environmentservice.DeleteProduct(username, envName, productName, requestID, true, log); err != nil {
-		_, messageMap := e.ErrorMessage(err)
-		if description, ok := messageMap["description"]; ok {
-			if description != "not found" {
-				return e.ErrUnForkProduct.AddDesc(description.(string))
-			}
-		} else {
-			errMsg := fmt.Sprintf("Failed to delete env %s in order to unfork product, the error is: %+v", envName, err)
-			log.Errorf(errMsg)
-			return e.ErrUnForkProduct.AddDesc(errMsg)
-		}
-	}
-	return nil
-}
-
-func FillProductTemplateVars(productTemplates []*template.Product, log *zap.SugaredLogger) error {
-	return commonservice.FillProductTemplateVars(productTemplates, log)
+	return ret
 }
 
 // ensureProductTmpl 检查产品模板参数
@@ -1034,39 +864,6 @@ func ensureProductTmpl(args *template.Product) error {
 		}
 	}
 
-	// Revision为0表示是新增项目，新增项目不需要进行共享服务的判断，只在编辑项目时进行判断
-	if args.Revision != 0 {
-		//获取该项目下的所有服务
-		productTmpl, err := templaterepo.NewProductColl().Find(args.ProductName)
-		if err != nil {
-			log.Errorf("Can not find project %s, error: %s", args.ProductName, err)
-			return fmt.Errorf("project not found: %s", err)
-		}
-
-		var newSharedServices []*template.ServiceInfo
-		currentSharedServiceMap := productTmpl.SharedServiceInfoMap()
-		for _, s := range args.SharedServices {
-			if _, ok := currentSharedServiceMap[s.Name]; !ok {
-				newSharedServices = append(newSharedServices, s)
-			}
-		}
-
-		if len(newSharedServices) > 0 {
-			services, err := commonrepo.NewServiceColl().ListMaxRevisions(&commonrepo.ServiceListOption{
-				InServices: newSharedServices,
-				Visibility: setting.PublicService,
-			})
-			if err != nil {
-				log.Errorf("Failed to list services, err: %s", err)
-				return err
-			}
-
-			if len(newSharedServices) != len(services) {
-				return fmt.Errorf("新增的共享服务服务不存在或者已经不是共享服务")
-			}
-		}
-	}
-
 	// 设置新的版本号
 	rev, err := commonrepo.NewCounterColl().GetNextSeq("product:" + args.ProductName)
 	if err != nil {
@@ -1074,6 +871,8 @@ func ensureProductTmpl(args *template.Product) error {
 	}
 
 	args.Revision = rev
+
+	args.ProjectNamePinyin, args.ProjectNamePinyinFirstLetter = util.GetPinyinFromChinese(args.ProjectName)
 	return nil
 }
 
@@ -1084,7 +883,11 @@ func DeleteProductsAsync(userName, productName, requestID string, isDelete bool,
 	}
 	errList := new(multierror.Error)
 	for _, env := range envs {
-		err = environmentservice.DeleteProduct(userName, env.EnvName, productName, requestID, isDelete, log)
+		if env.Production {
+			err = environmentservice.DeleteProductionProduct(userName, env.EnvName, productName, requestID, log)
+		} else {
+			err = environmentservice.DeleteProduct(userName, env.EnvName, productName, requestID, isDelete, log)
+		}
 		if err != nil {
 			errList = multierror.Append(errList, err)
 		}
@@ -1129,7 +932,7 @@ func ListTemplatesHierachy(userName string, log *zap.SugaredLogger) ([]*ProductI
 
 	for _, productTmpl := range productTmpls {
 		pInfo := &ProductInfo{Value: productTmpl.ProductName, Label: productTmpl.ProductName, ServiceInfo: []*ServiceInfo{}}
-		services, err := commonrepo.NewServiceColl().ListMaxRevisionsForServices(productTmpl.AllServiceInfos(), "")
+		services, err := commonrepo.NewServiceColl().ListMaxRevisionsForServices(productTmpl.AllTestServiceInfos(), "")
 		if err != nil {
 			log.Errorf("Failed to list service for project %s, error: %s", productTmpl.ProductName, err)
 			return nil, e.ErrGetProduct.AddDesc(err.Error())
@@ -1157,17 +960,18 @@ func GetCustomMatchRules(productName string, log *zap.SugaredLogger) ([]*ImagePa
 
 	rules := productInfo.ImageSearchingRules
 	if len(rules) == 0 {
-		rules = commonservice.GetPresetRules()
+		rules = commonutil.GetPresetRules()
 	}
 
 	ret := make([]*ImageParseData, 0, len(rules))
 	for _, singleData := range rules {
 		ret = append(ret, &ImageParseData{
-			Repo:     singleData.Repo,
-			Image:    singleData.Image,
-			Tag:      singleData.Tag,
-			InUse:    singleData.InUse,
-			PresetId: singleData.PresetId,
+			Repo:      singleData.Repo,
+			Namespace: singleData.Namespace,
+			Image:     singleData.Image,
+			Tag:       singleData.Tag,
+			InUse:     singleData.InUse,
+			PresetId:  singleData.PresetId,
 		})
 	}
 	return ret, nil
@@ -1200,22 +1004,32 @@ func UpdateCustomMatchRules(productName, userName, requestID string, matchRules 
 			continue
 		}
 		imageRulesToSave = append(imageRulesToSave, &template.ImageSearchingRule{
-			Repo:     singleData.Repo,
-			Image:    singleData.Image,
-			Tag:      singleData.Tag,
-			InUse:    singleData.InUse,
-			PresetId: singleData.PresetId,
+			Repo:      singleData.Repo,
+			Namespace: singleData.Namespace,
+			Image:     singleData.Image,
+			Tag:       singleData.Tag,
+			InUse:     singleData.InUse,
+			PresetId:  singleData.PresetId,
 		})
 	}
 
 	productInfo.ImageSearchingRules = imageRulesToSave
 	productInfo.UpdateBy = userName
 
-	services, err := commonrepo.NewServiceColl().ListMaxRevisionsByProduct(productName)
+	services, err := repository.ListMaxRevisionsServices(productName, false)
+	if err != nil {
+		return errors.Wrapf(err, "fail to list services of product %s", productName)
+	}
+	err = reParseServices(userName, requestID, services, imageRulesToSave, false)
 	if err != nil {
 		return err
 	}
-	err = reParseServices(userName, requestID, services, imageRulesToSave)
+
+	productionServices, err := repository.ListMaxRevisionsServices(productName, true)
+	if err != nil {
+		return errors.Wrapf(err, "fail to list production services of product %s", productName)
+	}
+	err = reParseServices(userName, requestID, productionServices, imageRulesToSave, true)
 	if err != nil {
 		return err
 	}
@@ -1230,7 +1044,7 @@ func UpdateCustomMatchRules(productName, userName, requestID string, matchRules 
 }
 
 // reparse values.yaml for each service
-func reParseServices(userName, requestID string, serviceList []*commonmodels.Service, matchRules []*template.ImageSearchingRule) error {
+func reParseServices(userName, requestID string, serviceList []*commonmodels.Service, matchRules []*template.ImageSearchingRule, production bool) error {
 	updatedServiceTmpls := make([]*commonmodels.Service, 0)
 
 	var err error
@@ -1249,7 +1063,7 @@ func reParseServices(userName, requestID string, serviceList []*commonmodels.Ser
 			break
 		}
 
-		serviceTmpl.Containers, err = commonservice.ParseImagesByRules(valuesMap, matchRules)
+		serviceTmpl.Containers, err = commonutil.ParseImagesByRules(valuesMap, matchRules)
 		if err != nil {
 			break
 		}
@@ -1259,22 +1073,37 @@ func reParseServices(userName, requestID string, serviceList []*commonmodels.Ser
 		}
 
 		serviceTmpl.CreateBy = userName
-		serviceTemplate := fmt.Sprintf(setting.ServiceTemplateCounterName, serviceTmpl.ServiceName, serviceTmpl.ProductName)
-		rev, errRevision := commonrepo.NewCounterColl().GetNextSeq(serviceTemplate)
+
+		// TODO optimize me: use common function to generate nex service revision
+		rev, errRevision := commonutil.GenerateServiceNextRevision(production, serviceTmpl.ServiceName, serviceTmpl.ProductName)
 		if errRevision != nil {
 			err = fmt.Errorf("get next helm service revision error: %v", errRevision)
 			break
 		}
 		serviceTmpl.Revision = rev
-		if err = commonrepo.NewServiceColl().Delete(serviceTmpl.ServiceName, setting.HelmDeployType, serviceTmpl.ProductName, setting.ProductStatusDeleting, serviceTmpl.Revision); err != nil {
-			log.Errorf("helmService.update delete %s error: %v", serviceTmpl.ServiceName, err)
-			break
-		}
 
-		if err = commonrepo.NewServiceColl().Create(serviceTmpl); err != nil {
-			log.Errorf("helmService.update serviceName:%s error:%v", serviceTmpl.ServiceName, err)
-			err = e.ErrUpdateTemplate.AddDesc(err.Error())
-			break
+		if !production {
+			if err = commonrepo.NewServiceColl().Delete(serviceTmpl.ServiceName, setting.HelmDeployType, serviceTmpl.ProductName, setting.ProductStatusDeleting, serviceTmpl.Revision); err != nil {
+				log.Errorf("helmService.update delete %s error: %v", serviceTmpl.ServiceName, err)
+				break
+			}
+
+			if err = commonrepo.NewServiceColl().Create(serviceTmpl); err != nil {
+				log.Errorf("helmService.update serviceName:%s error:%v", serviceTmpl.ServiceName, err)
+				err = e.ErrUpdateTemplate.AddDesc(err.Error())
+				break
+			}
+		} else {
+			if err = commonrepo.NewProductionServiceColl().Delete(serviceTmpl.ServiceName, serviceTmpl.ProductName, setting.ProductStatusDeleting, serviceTmpl.Revision); err != nil {
+				log.Errorf("helmService.update delete production service %s error: %v", serviceTmpl.ServiceName, err)
+				break
+			}
+
+			if err = commonrepo.NewProductionServiceColl().Create(serviceTmpl); err != nil {
+				log.Errorf("helmService.update production service, serviceName:%s error:%v", serviceTmpl.ServiceName, err)
+				err = e.ErrUpdateTemplate.AddDesc(err.Error())
+				break
+			}
 		}
 
 		updatedServiceTmpls = append(updatedServiceTmpls, serviceTmpl)
@@ -1283,14 +1112,24 @@ func reParseServices(userName, requestID string, serviceList []*commonmodels.Ser
 	// roll back all template services if error occurs
 	if err != nil {
 		for _, serviceTmpl := range updatedServiceTmpls {
-			if err = commonrepo.NewServiceColl().Delete(serviceTmpl.ServiceName, setting.HelmDeployType, serviceTmpl.ProductName, "", serviceTmpl.Revision); err != nil {
-				log.Errorf("helmService.update delete %s error: %v", serviceTmpl.ServiceName, err)
-				continue
+			if !production {
+				if err = commonrepo.NewServiceColl().Delete(serviceTmpl.ServiceName, setting.HelmDeployType, serviceTmpl.ProductName, "", serviceTmpl.Revision); err != nil {
+					log.Errorf("helmService.update delete %s error: %v", serviceTmpl.ServiceName, err)
+					continue
+				}
+			} else {
+				if err = commonrepo.NewProductionServiceColl().Delete(serviceTmpl.ServiceName, serviceTmpl.ProductName, "", serviceTmpl.Revision); err != nil {
+					log.Errorf("helmService.update delete %s error: %v", serviceTmpl.ServiceName, err)
+					continue
+				}
 			}
 		}
 		return err
 	}
 
+	if production {
+		return nil
+	}
 	return environmentservice.AutoDeployHelmServiceToEnvs(userName, requestID, projectName, updatedServiceTmpls, log.SugaredLogger())
 }
 
@@ -1316,21 +1155,361 @@ func DeleteCollabrationMode(productName string, userName string, log *zap.Sugare
 	return nil
 }
 
-func DeletePolicy(productName string, log *zap.SugaredLogger) error {
-	policy.NewDefault()
-	if err := policy.NewDefault().DeletePolicies(productName, policy.DeletePoliciesArgs{
-		Names: []string{},
-	}); err != nil {
-		log.Errorf("DeletePolicies err :%s", err)
-		return err
-	}
-	return nil
-}
-
 func DeleteLabels(productName string, log *zap.SugaredLogger) error {
 	if err := service2.DeleteLabelsAndBindingsByProject(productName, log); err != nil {
 		log.Errorf("delete labels and bindings by project fail , err :%s", err)
 		return err
 	}
 	return nil
+}
+
+func GetGlobalVariables(productName string, production bool, log *zap.SugaredLogger) ([]*commontypes.ServiceVariableKV, error) {
+	productInfo, err := templaterepo.NewProductColl().Find(productName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find product %s, err: %w", productName, err)
+	}
+
+	if production {
+		return productInfo.ProductionGlobalVariables, nil
+	}
+	return productInfo.GlobalVariables, nil
+}
+
+func UpdateGlobalVariables(productName, userName string, globalVariables []*commontypes.ServiceVariableKV, production bool) error {
+	productInfo, err := templaterepo.NewProductColl().Find(productName)
+	if err != nil {
+		return fmt.Errorf("failed to find product %s, err: %w", productName, err)
+	}
+
+	keySet := sets.NewString()
+	for _, kv := range globalVariables {
+		if keySet.Has(kv.Key) {
+			return fmt.Errorf("duplicated key: %s", kv.Key)
+		}
+		keySet.Insert(kv.Key)
+	}
+
+	productInfo.UpdateBy = userName
+	if production {
+		productInfo.ProductionGlobalVariables = globalVariables
+	} else {
+		productInfo.GlobalVariables = globalVariables
+	}
+
+	err = templaterepo.NewProductColl().Update(productName, productInfo)
+	if err != nil {
+		return fmt.Errorf("failed to update product: %s, err: %w", productName, err)
+	}
+
+	return nil
+}
+
+type GetGlobalVariableCandidatesRespone struct {
+	KeyName        string   `json:"key_name"`
+	RelatedService []string `json:"related_service"`
+}
+
+func GetGlobalVariableCandidates(productName string, production bool, log *zap.SugaredLogger) ([]*GetGlobalVariableCandidatesRespone, error) {
+	productInfo, err := templaterepo.NewProductColl().Find(productName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find product %s, err: %w", productName, err)
+	}
+
+	services, err := repository.ListMaxRevisionsServices(productName, production)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list services by product %s, err: %w", productName, err)
+	}
+
+	existedVariableSet := sets.NewString()
+	variableMap := make(map[string]*GetGlobalVariableCandidatesRespone)
+	if production {
+		for _, kv := range productInfo.ProductionGlobalVariables {
+			existedVariableSet.Insert(kv.Key)
+		}
+	} else {
+		for _, kv := range productInfo.GlobalVariables {
+			existedVariableSet.Insert(kv.Key)
+		}
+	}
+
+	ret := make([]*GetGlobalVariableCandidatesRespone, 0)
+	for _, service := range services {
+		for _, kv := range service.ServiceVariableKVs {
+			if !existedVariableSet.Has(kv.Key) {
+				if candiate, ok := variableMap[kv.Key]; ok {
+					candiate.RelatedService = append(candiate.RelatedService, service.ServiceName)
+				} else {
+					variableMap[kv.Key] = &GetGlobalVariableCandidatesRespone{
+						KeyName:        kv.Key,
+						RelatedService: []string{service.ServiceName},
+					}
+				}
+			}
+		}
+	}
+
+	for _, candiate := range variableMap {
+		ret = append(ret, candiate)
+	}
+
+	return ret, nil
+}
+
+func CreateProjectGroup(args *ProjectGroupArgs, user string, logger *zap.SugaredLogger) error {
+	groups, err := commonrepo.NewProjectGroupColl().List()
+	if err != nil {
+		errMsg := fmt.Errorf("failed to list project groups, error: %v", err)
+		logger.Errorf(errMsg.Error())
+		return e.ErrCreateProjectGroup.AddErr(errMsg)
+	}
+
+	// find all project keys that have been set
+	set := sets.NewString()
+	for _, group := range groups {
+		for _, project := range group.Projects {
+			set.Insert(project.ProjectKey)
+		}
+	}
+
+	projects, err := templaterepo.NewProductColl().List()
+	if err != nil {
+		errMsg := fmt.Errorf("failed to list projects, error: %v", err)
+		logger.Errorf(errMsg.Error())
+		return e.ErrCreateProjectGroup.AddErr(errMsg)
+	}
+
+	pm := make(map[string]*template.Product)
+	for _, project := range projects {
+		pm[project.ProductName] = project
+	}
+
+	group := &commonmodels.ProjectGroup{
+		Name:        args.GroupName,
+		CreatedTime: time.Now().Unix(),
+		UpdateTime:  time.Now().Unix(),
+		CreatedBy:   user,
+		UpdateBy:    user,
+		Projects:    make([]*commonmodels.ProjectDetail, 0),
+	}
+	for _, project := range args.ProjectKeys {
+		if set.Has(project) {
+			return e.ErrCreateProjectGroup.AddErr(fmt.Errorf("failed to set project %s to group %s, project Key %s has been set in other groups", project, args.GroupName, project))
+		}
+
+		if p, ok := pm[project]; ok {
+			group.Projects = append(group.Projects, &commonmodels.ProjectDetail{
+				ProjectKey:        p.ProductName,
+				ProjectName:       p.ProjectName,
+				ProjectDeployType: p.ProductFeature.DeployType,
+			})
+		} else {
+			return e.ErrCreateProjectGroup.AddErr(fmt.Errorf("project Key %s not in current project list", project))
+		}
+	}
+
+	if err := commonrepo.NewProjectGroupColl().Create(group); err != nil {
+		errMsg := fmt.Errorf("failed to create project group, error: %v", err)
+		logger.Errorf(errMsg.Error())
+		return e.ErrCreateProjectGroup.AddErr(errMsg)
+	}
+	return nil
+}
+
+func UpdateProjectGroup(args *ProjectGroupArgs, user string, logger *zap.SugaredLogger) error {
+	if args.GroupID == "" {
+		return e.ErrUpdateProjectGroup.AddDesc("group id can not be empty")
+	}
+
+	groups, err := commonrepo.NewProjectGroupColl().List()
+	if err != nil {
+		errMsg := fmt.Errorf("failed to list project groups, error: %v", err)
+		logger.Errorf(errMsg.Error())
+		return e.ErrCreateProjectGroup.AddErr(errMsg)
+	}
+
+	oldGroup, err := commonrepo.NewProjectGroupColl().Find(commonrepo.ProjectGroupOpts{ID: args.GroupID})
+	if err != nil {
+		return e.ErrUpdateProjectGroup.AddErr(fmt.Errorf("failed to find project group %s, error: %v", args.GroupName, err))
+	}
+
+	// find all project keys that have been set
+	set := sets.NewString()
+	for _, group := range groups {
+		if oldGroup.Name != args.GroupName && group.Name == args.GroupName {
+			return fmt.Errorf("group name %s has been used", args.GroupName)
+		}
+		if group.Name != oldGroup.Name {
+			for _, project := range group.Projects {
+				set.Insert(project.ProjectKey)
+			}
+		}
+	}
+
+	projects, err := templaterepo.NewProductColl().List()
+	if err != nil {
+		errMsg := fmt.Errorf("failed to list projects, error: %v", err)
+		logger.Errorf(errMsg.Error())
+		return e.ErrUpdateProjectGroup.AddErr(errMsg)
+	}
+
+	pm := make(map[string]*template.Product)
+	for _, project := range projects {
+		pm[project.ProductName] = project
+	}
+	group := &commonmodels.ProjectGroup{
+		Name:       args.GroupName,
+		UpdateTime: time.Now().Unix(),
+		UpdateBy:   user,
+		Projects:   make([]*commonmodels.ProjectDetail, 0),
+	}
+	for _, project := range args.ProjectKeys {
+		if set.Has(project) {
+			return e.ErrCreateProjectGroup.AddErr(fmt.Errorf("failed to set project %s to group %s, project Key %s has been set in other groups", project, args.GroupName, project))
+		}
+
+		if p, ok := pm[project]; ok {
+			group.Projects = append(group.Projects, &commonmodels.ProjectDetail{
+				ProjectKey:        p.ProductName,
+				ProjectName:       p.ProjectName,
+				ProjectDeployType: p.ProductFeature.DeployType,
+			})
+		} else {
+			return e.ErrUpdateProjectGroup.AddErr(fmt.Errorf("project Key %s not in current project list", project))
+		}
+	}
+
+	group.ID = oldGroup.ID
+	group.CreatedTime = oldGroup.CreatedTime
+	group.CreatedBy = oldGroup.CreatedBy
+
+	if err := commonrepo.NewProjectGroupColl().Update(group); err != nil {
+		errMsg := fmt.Errorf("failed to update project group, groupName:%s, error: %v", oldGroup.Name, err)
+		logger.Errorf(errMsg.Error())
+		return e.ErrUpdateProjectGroup.AddErr(errMsg)
+	}
+	return nil
+}
+
+func DeleteProjectGroup(name string, logger *zap.SugaredLogger) error {
+	if err := commonrepo.NewProjectGroupColl().Delete(name); err != nil {
+		return e.ErrDeleteProjectGroup.AddErr(fmt.Errorf("failed to delete project group %s, error: %v", name, err))
+	}
+	return nil
+}
+
+func ListProjectGroupNames() ([]string, error) {
+	groups, err := commonrepo.NewProjectGroupColl().ListGroupNames()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list project groups, error: %v", err)
+	}
+
+	return groups, nil
+}
+
+func GetProjectGroupRelation(name string, logger *zap.SugaredLogger) (resp *ProjectGroupPreset, err error) {
+	var group *commonmodels.ProjectGroup
+	if name != "" {
+		group, err = commonrepo.NewProjectGroupColl().Find(commonrepo.ProjectGroupOpts{Name: name})
+		if err != nil {
+			return nil, fmt.Errorf("failed to find project group %s, error: %v", name, err)
+		}
+	}
+
+	resp = &ProjectGroupPreset{
+		Projects: make([]*ProjectGroupRelation, 0),
+	}
+	if group != nil {
+		resp.GroupName = group.Name
+		resp.GroupID = group.ID.Hex()
+	}
+
+	if group != nil {
+		for _, project := range group.Projects {
+			resp.Projects = append(resp.Projects, &ProjectGroupRelation{
+				ProjectKey:  project.ProjectKey,
+				ProjectName: project.ProjectName,
+				DeployType:  project.ProjectDeployType,
+				Enabled:     true,
+			})
+		}
+	}
+
+	unGrouped, err := GetUnGroupedProjectKeys()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list ungrouped projects, error: %v", err)
+	}
+
+	if len(unGrouped) > 0 {
+		projects, err := templaterepo.NewProductColl().ListProjectBriefs(unGrouped)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list projects, error: %v", err)
+		}
+
+		for _, project := range projects {
+			resp.Projects = append(resp.Projects, &ProjectGroupRelation{
+				ProjectKey:  project.Name,
+				ProjectName: project.Alias,
+				DeployType:  project.ProductFeature.GetDeployType(),
+				Enabled:     false,
+			})
+		}
+	}
+
+	sort.Slice(resp.Projects, func(i, j int) bool {
+		return resp.Projects[i].ProjectKey < resp.Projects[j].ProjectKey
+	})
+	return resp, nil
+}
+
+func AddProject2CurrentGroup(groupName, projectKey, projectDisplayName, deployType, user string) error {
+	group, err := commonrepo.NewProjectGroupColl().Find(commonrepo.ProjectGroupOpts{Name: groupName})
+	if err != nil {
+		return fmt.Errorf("failed to find project group %s, error: %v", groupName, err)
+	}
+
+	for _, project := range group.Projects {
+		if project.ProjectKey == projectKey {
+			return nil
+		}
+	}
+
+	group.Projects = append(group.Projects, &commonmodels.ProjectDetail{
+		ProjectKey:        projectKey,
+		ProjectName:       projectDisplayName,
+		ProjectDeployType: deployType,
+	})
+	group.UpdateBy = user
+	group.UpdateTime = time.Now().Unix()
+
+	if err := commonrepo.NewProjectGroupColl().Update(group); err != nil {
+		return fmt.Errorf("failed to update project group %s, error: %v", groupName, err)
+	}
+	return nil
+}
+
+func GetUnGroupedProjectKeys() ([]string, error) {
+	groups, err := commonrepo.NewProjectGroupColl().List()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list project groups, error: %v", err)
+	}
+
+	set := sets.NewString()
+	for _, group := range groups {
+		for _, project := range group.Projects {
+			set.Insert(project.ProjectKey)
+		}
+	}
+
+	projects, err := templaterepo.NewProductColl().ListAllName()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list projects, error: %v", err)
+	}
+
+	unGroupedKeys := make([]string, 0)
+	for _, project := range projects {
+		if !set.Has(project) {
+			unGroupedKeys = append(unGroupedKeys, project)
+		}
+	}
+	return unGroupedKeys, nil
 }

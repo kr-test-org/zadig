@@ -20,7 +20,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
-	"github.com/koderover/zadig/pkg/util/converter"
+	"github.com/koderover/zadig/v2/pkg/util/converter"
 )
 
 var testYaml1 = `
@@ -117,6 +117,23 @@ var testYaml9 = `
       tag: 0.1.0
 `
 
+var testYaml10 = `
+  env: dev
+  fullnameOverride: service1
+  github: {}
+  image:
+    pullPolicy: IfNotPresent
+    repo: koderover.tencentcloudcr.com
+    project: koderover-demo
+    name: go-sample-site
+    tag: 0.1.0
+  imagePullSecrets:
+  - name: default-registry-secret
+  imagePullSecretsName: default-registry-secret
+  port: 22222
+  replicaCount: 4	
+`
+
 var err error
 var lcpMatedPaths []map[string]string
 
@@ -205,6 +222,19 @@ var _ = Describe("Testing search", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			gomega.Expect(lcpMatedPaths).Should(gomega.ConsistOf([]map[string]string{
 				{"image": "deploy.image.name", "repo": "global.hub", "tag": "deploy.image.tag"},
+			}))
+		})
+
+		It("match multiple rules of pattern", func() {
+			pattern := []map[string]string{
+				{"repo": "image.repo", "namespace": "image.project", "tag": "image.tag", "image": "image.name"},
+				{"repo": "image.repo", "tag": "image.tag", "image": "image.name"},
+			}
+			flatMap, _ := converter.YamlToFlatMap([]byte(testYaml10))
+			lcpMatedPaths, err = SearchByPattern(flatMap, pattern)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(lcpMatedPaths).Should(gomega.ConsistOf([]map[string]string{
+				{"image": "image.name", "repo": "image.repo", "tag": "image.tag", "namespace": "image.project"},
 			}))
 		})
 

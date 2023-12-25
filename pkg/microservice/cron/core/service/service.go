@@ -19,9 +19,11 @@ package service
 import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
-	templatemodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models/template"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/types"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	templatemodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models/template"
+	commontypes "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/types"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/types"
 )
 
 type SvcRevision struct {
@@ -52,22 +54,27 @@ type EnvResource struct {
 }
 
 type ProductResp struct {
-	ID          string      `json:"id"`
-	ProductName string      `json:"product_name"`
-	Namespace   string      `json:"namespace"`
-	Status      string      `json:"status"`
-	Error       string      `json:"error"`
-	EnvName     string      `json:"env_name"`
-	UpdateBy    string      `json:"update_by"`
-	UpdateTime  int64       `json:"update_time"`
-	Services    [][]string  `json:"services"`
-	Render      *RenderInfo `json:"render"`
-	Vars        []*RenderKV `json:"vars"`
-	IsPublic    bool        `json:"isPublic"`
-	ClusterID   string      `json:"cluster_id,omitempty"`
-	RecycleDay  int         `json:"recycle_day"`
-	IsProd      bool        `json:"is_prod"`
-	Source      string      `json:"source"`
+	ID          string                           `json:"id"`
+	ProductName string                           `json:"product_name"`
+	Namespace   string                           `json:"namespace"`
+	Status      string                           `json:"status"`
+	Error       string                           `json:"error"`
+	EnvName     string                           `json:"env_name"`
+	UpdateBy    string                           `json:"update_by"`
+	UpdateTime  int64                            `json:"update_time"`
+	Services    [][]*commonmodels.ProductService `json:"services"`
+	Render      *RenderInfo                      `json:"render"`
+	Vars        []*RenderKV                      `json:"vars"`
+	IsPublic    bool                             `json:"isPublic"`
+	ClusterID   string                           `json:"cluster_id,omitempty"`
+	RecycleDay  int                              `json:"recycle_day"`
+	IsProd      bool                             `json:"is_prod"`
+	Source      string                           `json:"source"`
+
+	DefaultValues string                     `bson:"default_values,omitempty"       json:"default_values,omitempty"`
+	YamlData      *templatemodels.CustomYaml `bson:"yaml_data,omitempty"            json:"yaml_data,omitempty"`
+	// GlobalValues for k8s projects
+	GlobalVariables []*commontypes.GlobalVariableKV `bson:"global_variables,omitempty"     json:"global_variables,omitempty"`
 }
 
 type ProductRenderset struct {
@@ -107,12 +114,15 @@ type PmHealthCheck struct {
 }
 
 type PrivateKeyHosts struct {
-	ID           primitive.ObjectID   `json:"id,omitempty"`
-	IP           string               `json:"ip"`
-	Port         int64                `json:"port"`
-	Status       setting.PMHostStatus `json:"status"`
-	Probe        *types.Probe         `json:"probe"`
-	UpdateStatus bool                 `json:"update_status"`
+	ID           primitive.ObjectID    `json:"id,omitempty"`
+	IP           string                `json:"ip"`
+	Port         int64                 `json:"port"`
+	Status       setting.PMHostStatus  `json:"status"`
+	Error        string                `json:"error"`
+	Probe        *types.Probe          `json:"probe"`
+	UpdateStatus bool                  `json:"update_status"`
+	Agent        *commonmodels.VMAgent `json:"agent,omitempty"`
+	Type         string                `json:"type"`
 }
 
 type EnvStatus struct {

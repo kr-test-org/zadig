@@ -23,12 +23,6 @@ import (
 type Router struct{}
 
 func (*Router) Inject(router *gin.RouterGroup) {
-	// 查看自定义变量是否被引用
-	render := router.Group("renders")
-	{
-		render.GET("/render/:name/revision/:revision", GetRenderSetInfo)
-		render.PUT("", UpdateRenderSet)
-	}
 
 	// ---------------------------------------------------------------------------------------
 	// 项目管理接口
@@ -46,17 +40,37 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		product.PUT("", UpdateProject)
 		product.PUT("/:name/type", TransferProject)
 		product.DELETE("/:name", DeleteProductTemplate)
+
+		product.GET("/:name/globalVariables", GetGlobalVariables)
+		product.PUT("/:name/globalVariables", UpdateGlobalVariables)
+		product.GET("/:name/globalVariableCandidates", GetGlobalVariableCandidates)
+
+		product.GET("/:name/productionGlobalVariables", GetProductionGlobalVariables)
+		product.PUT("/:name/productionGlobalVariables", UpdateProductionGlobalVariables)
+		product.GET("/:name/productionGlobalVariableCandidates", GetProductionGlobalVariableCandidates)
+	}
+
+	group := router.Group("group")
+	{
+		group.POST("", CreateProjectGroup)
+		group.PUT("", UpdateProjectGroup)
+		group.DELETE("", DeleteProjectGroup)
+		group.GET("", ListProjectGroups)
+		group.GET("/preset", GetPresetProjectGroup)
+	}
+
+	bizdir := router.Group("bizdir")
+	{
+		bizdir.GET("", GetBizDirProject)
+		bizdir.GET("/services", GetBizDirProjectServices)
+		bizdir.GET("/service/detail", GetBizDirServiceDetail)
+		bizdir.GET("/search/project", SearchBizDirByProject)
+		bizdir.GET("/search/service", SearchBizDirByService)
 	}
 
 	production := router.Group("production/products")
 	{
 		production.PATCH("/:name", UpdateProductionServiceOrchestration)
-	}
-
-	openSource := router.Group("opensource")
-	{
-		openSource.POST("/:productName/fork", ForkProduct)
-		openSource.DELETE("/:productName/fork", UnForkProduct)
 	}
 
 	template := router.Group("templates")
@@ -78,6 +92,10 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		pms.POST("/batch", BatchCreatePMHost)
 		pms.PUT("/:id", UpdatePMHost)
 		pms.DELETE("/:id", DeletePMHost)
+		pms.GET("/:id/agent/access", GetAgentAccessCmd)
+		pms.PUT("/:id/agent/offline", OfflineVM)
+		pms.PUT("/:id/agent/recovery", RecoveryVM)
+		pms.PUT("/:id/agent/upgrade", UpgradeAgent)
 	}
 
 	variables := router.Group("variablesets")
@@ -88,6 +106,20 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		variables.PUT("/:id", UpdateVariableSet)
 		variables.DELETE("/:id", DeleteVariableSet)
 	}
+
+	integration := router.Group("integration")
+	{
+		codehost := integration.Group(":name/codehosts")
+		{
+			codehost.GET("", ListProjectCodeHost)
+			codehost.DELETE("/:id", DeleteCodeHost)
+			codehost.POST("", CreateProjectCodeHost)
+			codehost.PATCH("/:id", UpdateProjectCodeHost)
+			codehost.GET("/:id", GetProjectCodeHost)
+			codehost.GET("/available", ListAvailableCodeHost)
+		}
+	}
+
 }
 
 type OpenAPIRouter struct{}
@@ -97,5 +129,10 @@ func (*OpenAPIRouter) Inject(router *gin.RouterGroup) {
 	{
 		product.POST("", OpenAPICreateProductTemplate)
 		product.POST("/init/yaml", OpenAPIInitializeYamlProject)
+		product.POST("/init/helm", OpenAPIInitializeHelmProject)
+		product.GET("", OpenAPIListProject)
+		product.GET("/detail", OpenAPIGetProjectDetail)
+		product.DELETE("", OpenAPIDeleteProject)
+		product.GET("/globalVariable", OpenAPIGetGlobalVariables)
 	}
 }

@@ -21,27 +21,28 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models/template"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	templatemodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb/template"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/types"
-	"github.com/koderover/zadig/pkg/setting"
-	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	"github.com/koderover/zadig/pkg/tool/kube/getter"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/util"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models/template"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	templatemodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb/template"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/types"
+	commontypes "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/types"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	kubeclient "github.com/koderover/zadig/v2/pkg/shared/kube/client"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/getter"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/util"
 )
 
 type DeployableEnv struct {
-	EnvName   string                       `json:"env_name"`
-	Namespace string                       `json:"namespace"`
-	ClusterID string                       `json:"cluster_id"`
-	Services  []*types.ServiceWithVariable `json:"services"`
-	//Vars      []*template.RenderKV `json:"vars"`
+	EnvName           string                          `json:"env_name"`
+	Namespace         string                          `json:"namespace"`
+	ClusterID         string                          `json:"cluster_id"`
+	Services          []*types.ServiceWithVariable    `json:"services"`
+	GlobalVariableKVs []*commontypes.GlobalVariableKV `json:"global_variable_kvs"`
 }
 
 type DeployableEnvResp struct {
@@ -143,7 +144,7 @@ func GetKubeWorkloads(namespace, clusterID string, log *zap.SugaredLogger) (*Get
 		ingressNames = append(ingressNames, ingress.GetName())
 	}
 	workloadsMap["ingress"] = ingressNames
-	secrets, err := getter.ListSecrets(namespace, kubeClient)
+	secrets, err := getter.ListSecrets(namespace, nil, kubeClient)
 	if err != nil {
 		log.Errorf("GetKubeWorkloads ListSecrets error, error msg:%s", err)
 		return nil, err
@@ -323,7 +324,7 @@ func getServiceVariables(templateProduct *template.Product, product *commonmodel
 		return ret
 	}
 
-	args, _, err := commonservice.GetK8sSvcRenderArgs(product.ProductName, product.EnvName, "", log.SugaredLogger())
+	args, _, err := commonservice.GetK8sSvcRenderArgs(product.ProductName, product.EnvName, "", product.Production, log.SugaredLogger())
 	if err != nil {
 		log.Errorf("failed to get k8s service render args, err: %s", err)
 	}
@@ -332,6 +333,7 @@ func getServiceVariables(templateProduct *template.Product, product *commonmodel
 		ret = append(ret, &types.ServiceWithVariable{
 			ServiceName:  arg.ServiceName,
 			VariableYaml: arg.LatestVariableYaml,
+			VariableKVs:  arg.LatestVariableKVs,
 		})
 	}
 
@@ -352,12 +354,14 @@ func getAllGeneralEnvs(templateProduct *template.Product) ([]*DeployableEnv, err
 
 	envNames := make([]string, len(envs))
 	for i, env := range envs {
+
 		envNames[i] = env.EnvName
 		ret[i] = &DeployableEnv{
-			EnvName:   env.EnvName,
-			Namespace: env.Namespace,
-			ClusterID: env.ClusterID,
-			Services:  getServiceVariables(templateProduct, env),
+			EnvName:           env.EnvName,
+			Namespace:         env.Namespace,
+			ClusterID:         env.ClusterID,
+			GlobalVariableKVs: env.GlobalVariables,
+			Services:          getServiceVariables(templateProduct, env),
 		}
 	}
 
@@ -378,11 +382,13 @@ func getDeployableShareEnvs(svcName string, templateProduct *template.Product) (
 
 	ret := make([]*DeployableEnv, 0)
 	for _, baseEnv := range baseEnvs {
+
 		ret = append(ret, &DeployableEnv{
-			EnvName:   baseEnv.EnvName,
-			Namespace: baseEnv.Namespace,
-			ClusterID: baseEnv.ClusterID,
-			Services:  getServiceVariables(templateProduct, baseEnv),
+			EnvName:           baseEnv.EnvName,
+			Namespace:         baseEnv.Namespace,
+			ClusterID:         baseEnv.ClusterID,
+			GlobalVariableKVs: baseEnv.GlobalVariables,
+			Services:          getServiceVariables(templateProduct, baseEnv),
 		})
 
 		if !hasSvcInEnv(svcName, baseEnv) {
@@ -413,21 +419,14 @@ func getSubEnvs(baseEnvName string, templateProduct *template.Product) ([]*Deplo
 		return nil, err
 	}
 
-	//if templateProduct.IsK8sYamlProduct() {
-	//	err = service.FillProductVars(envs, log.SugaredLogger())
-	//	if err != nil {
-	//		return nil, err
-	//	}
-	//}
-
 	ret := make([]*DeployableEnv, len(envs))
 	for i, env := range envs {
 		ret[i] = &DeployableEnv{
-			EnvName:   env.EnvName,
-			Namespace: env.Namespace,
-			ClusterID: env.ClusterID,
-			Services:  getServiceVariables(templateProduct, env),
-			//Vars:      env.Vars,
+			EnvName:           env.EnvName,
+			Namespace:         env.Namespace,
+			ClusterID:         env.ClusterID,
+			GlobalVariableKVs: env.GlobalVariables,
+			Services:          getServiceVariables(templateProduct, env),
 		}
 	}
 

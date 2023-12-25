@@ -29,11 +29,11 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	templatemodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models/template"
-	"github.com/koderover/zadig/pkg/setting"
-	mongotool "github.com/koderover/zadig/pkg/tool/mongo"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	templatemodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models/template"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	mongotool "github.com/koderover/zadig/v2/pkg/tool/mongo"
 )
 
 type ServiceFindOption struct {
@@ -55,7 +55,6 @@ type ServiceListOption struct {
 	BuildName      string
 	Type           string
 	Source         string
-	Visibility     string
 	ExcludeProject string
 	InServices     []*templatemodels.ServiceInfo
 	NotInServices  []*templatemodels.ServiceInfo
@@ -77,7 +76,7 @@ type ServiceAggregateResult struct {
 
 type ServiceColl struct {
 	*mongo.Collection
-
+	mongo.Session
 	coll string
 }
 
@@ -85,6 +84,15 @@ func NewServiceColl() *ServiceColl {
 	name := models.Service{}.TableName()
 	return &ServiceColl{
 		Collection: mongotool.Database(config.MongoDatabase()).Collection(name),
+		coll:       name,
+	}
+}
+
+func NewServiceCollWithSession(session mongo.Session) *ServiceColl {
+	name := models.Service{}.TableName()
+	return &ServiceColl{
+		Collection: mongotool.Database(config.MongoDatabase()).Collection(name),
+		Session:    session,
 		coll:       name,
 	}
 }
@@ -206,20 +214,20 @@ func (c *ServiceColl) ListMaxRevisionsByProduct(productName string) ([]*models.S
 	return c.listMaxRevisions(m, nil)
 }
 
-func (c *ServiceColl) ListMaxRevisionServicesByChartTemplate(templateName string) ([]*models.Service, error) {
-	m := bson.M{
-		"create_from.template_name": templateName,
-		"status":                    bson.M{"$ne": setting.ProductStatusDeleting},
-		"source":                    setting.SourceFromChartTemplate,
-	}
-	return c.listMaxRevisions(m, nil)
-}
-
 func (c *ServiceColl) ListMaxRevisionsAllSvcByProduct(productName string) ([]*models.Service, error) {
 	m := bson.M{
 		"product_name": productName,
 	}
 	return c.listMaxRevisions(m, nil)
+}
+
+func (c *ServiceColl) SearchMaxRevisionsByService(serviceName string) ([]*models.Service, error) {
+	pre := bson.M{
+		"status": bson.M{"$ne": setting.ProductStatusDeleting},
+	}
+	pre["service_name"] = bson.M{"$regex": fmt.Sprintf(".*%s.*", serviceName), "$options": "i"}
+
+	return c.listMaxRevisions(pre, nil)
 }
 
 // Find 根据service_name和type查询特定版本的配置模板
@@ -253,7 +261,7 @@ func (c *ServiceColl) Find(opt *ServiceFindOption) (*models.Service, error) {
 		opts.SetSort(bson.D{{"revision", -1}})
 	}
 
-	err := c.FindOne(context.TODO(), query, opts).Decode(service)
+	err := c.FindOne(mongotool.SessionContext(context.TODO(), c.Session), query, opts).Decode(service)
 	if err != nil {
 		if err == mongo.ErrNoDocuments && opt.IgnoreNoDocumentErr {
 			return nil, nil
@@ -286,7 +294,7 @@ func (c *ServiceColl) Delete(serviceName, serviceType, productName, status strin
 		return nil
 	}
 
-	_, err := c.DeleteMany(context.TODO(), query)
+	_, err := c.DeleteMany(mongotool.SessionContext(context.TODO(), c.Session), query)
 
 	return err
 }
@@ -305,7 +313,7 @@ func (c *ServiceColl) Create(args *models.Service) error {
 		h.Write([]byte(args.Yaml + "\n"))
 		args.Hash = fmt.Sprintf("%x", h.Sum(nil))
 	}
-	_, err := c.InsertOne(context.TODO(), args)
+	_, err := c.InsertOne(mongotool.SessionContext(context.TODO(), c.Session), args)
 	return err
 }
 
@@ -347,8 +355,6 @@ func (c *ServiceColl) Update(args *models.Service) error {
 	//非容器部署服务在探活过程中会更新health_check相关的参数，其他的情况只会更新服务共享属性
 	if len(args.EnvStatuses) > 0 {
 		changeMap["env_statuses"] = args.EnvStatuses
-	} else {
-		changeMap["visibility"] = args.Visibility
 	}
 	change := bson.M{"$set": changeMap}
 	_, err := c.UpdateOne(context.TODO(), query, change)
@@ -364,8 +370,8 @@ func (c *ServiceColl) UpdateServiceVariables(args *models.Service) error {
 
 	query := bson.M{"product_name": args.ProductName, "service_name": args.ServiceName, "revision": args.Revision}
 	changeMap := bson.M{
-		"variable_yaml": args.VariableYaml,
-		"service_vars":  args.ServiceVars,
+		"variable_yaml":        args.VariableYaml,
+		"service_variable_kvs": args.ServiceVariableKVs,
 	}
 	change := bson.M{"$set": changeMap}
 	_, err := c.UpdateOne(context.TODO(), query, change)
@@ -469,7 +475,7 @@ func (c *ServiceColl) UpdateExternalServiceEnvName(serviceName, productName, env
 		"env_name": envName,
 	}}
 
-	_, err := c.UpdateOne(context.TODO(), query, change)
+	_, err := c.UpdateOne(mongotool.SessionContext(context.TODO(), c.Session), query, change)
 	return err
 }
 
@@ -493,7 +499,7 @@ func (c *ServiceColl) UpdateExternalServicesStatus(serviceName, productName, sta
 		"status": status,
 	}}
 
-	_, err := c.UpdateMany(context.TODO(), query, change)
+	_, err := c.UpdateMany(mongotool.SessionContext(context.TODO(), c.Session), query, change)
 	return err
 }
 
@@ -550,12 +556,17 @@ func (c *ServiceColl) ListServicesWithSRevision(opt *SvcRevisionListOption) ([]*
 		{
 			"$match": productMatch,
 		},
-		{
+	}
+	if len(opt.ServiceRevisions) > 0 {
+		pipeline = append(pipeline, bson.M{
 			"$match": bson.M{
 				"$or": serviceMatch,
 			},
-		},
+		})
+	} else {
+		return []*models.Service{}, nil
 	}
+
 	cursor, err := c.Aggregate(context.TODO(), pipeline)
 	if err != nil {
 		return nil, err
@@ -649,9 +660,7 @@ func (c *ServiceColl) ListMaxRevisions(opt *ServiceListOption) ([]*models.Servic
 		if opt.BuildName != "" {
 			postMatch["build_name"] = opt.BuildName
 		}
-		if opt.Visibility != "" {
-			postMatch["visibility"] = opt.Visibility
-		}
+
 		if len(opt.NotInServices) > 0 {
 			var srs []bson.D
 			for _, s := range opt.NotInServices {
@@ -745,6 +754,19 @@ func (c *ServiceColl) GetYamlTemplateReference(templateID string) ([]*models.Ser
 	return c.listMaxRevisions(query, postMatch)
 }
 
+func (c *ServiceColl) GetYamlTemplateLatestReference(templateID string) ([]*models.Service, error) {
+	query := bson.M{
+		"status": bson.M{"$ne": setting.ProductStatusDeleting},
+	}
+
+	postMatch := bson.M{
+		"source":      setting.ServiceSourceTemplate,
+		"template_id": templateID,
+	}
+
+	return c.listMaxRevisions(query, postMatch)
+}
+
 func (c *ServiceColl) listMaxRevisions(preMatch, postMatch bson.M) ([]*models.Service, error) {
 	var pipeResp []*grouped
 	pipeline := []bson.M{
@@ -765,6 +787,7 @@ func (c *ServiceColl) listMaxRevisions(preMatch, postMatch bson.M) ([]*models.Se
 				"build_name":  bson.M{"$last": "$build_name"},
 				"template_id": bson.M{"$last": "$template_id"},
 				"create_from": bson.M{"$last": "$create_from"},
+				"source":      bson.M{"$last": "$source"},
 			},
 		},
 	}

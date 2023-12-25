@@ -19,9 +19,11 @@ package job
 import (
 	"errors"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/util"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
 )
 
 type MeegoTransitionJob struct {
@@ -60,14 +62,14 @@ func (j *MeegoTransitionJob) MergeArgs(args *commonmodels.Job) error {
 }
 
 func (j *MeegoTransitionJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
-	meegoInfo, err := commonrepo.NewProjectManagementColl().GetMeego()
-	if err != nil {
-		return nil, errors.New("failed to find meego integration info")
-	}
 	resp := []*commonmodels.JobTask{}
 	j.spec = &commonmodels.MeegoTransitionJobSpec{}
 	if err := commonmodels.IToi(j.job.Spec, j.spec); err != nil {
 		return resp, err
+	}
+	meegoInfo, err := commonrepo.NewProjectManagementColl().GetMeegoByID(j.spec.MeegoID)
+	if err != nil {
+		return nil, errors.New("failed to find meego integration info")
 	}
 	jobTask := &commonmodels.JobTask{
 		Name: j.job.Name,
@@ -77,6 +79,7 @@ func (j *MeegoTransitionJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, erro
 		},
 		JobType: string(config.JobMeegoTransition),
 		Spec: &commonmodels.MeegoTransitionSpec{
+			MeegoID:         meegoInfo.ID.Hex(),
 			Link:            meegoInfo.MeegoHost,
 			Source:          j.spec.Source,
 			ProjectKey:      j.spec.ProjectKey,
@@ -91,5 +94,9 @@ func (j *MeegoTransitionJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, erro
 }
 
 func (j *MeegoTransitionJob) LintJob() error {
+	if err := util.CheckZadigXLicenseStatus(); err != nil {
+		return e.ErrLicenseInvalid.AddDesc("")
+	}
+
 	return nil
 }

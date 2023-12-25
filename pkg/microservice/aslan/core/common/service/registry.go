@@ -31,13 +31,13 @@ import (
 	"go.uber.org/zap"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/kube"
-	"github.com/koderover/zadig/pkg/tool/crypto"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	"github.com/koderover/zadig/pkg/util"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/kube"
+	"github.com/koderover/zadig/v2/pkg/tool/crypto"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/util"
 )
 
 var expirationTime = 10 * time.Hour
@@ -96,6 +96,16 @@ func findRegisty(regOps *mongodb.FindRegOps, getRealCredential bool, log *zap.Su
 
 func FindDefaultRegistry(getRealCredential bool, log *zap.SugaredLogger) (reg *models.RegistryNamespace, isSystemDefault bool, err error) {
 	return findRegisty(&mongodb.FindRegOps{IsDefault: true}, getRealCredential, log)
+}
+
+func ListRegistryByProject(projectName string, log *zap.SugaredLogger) ([]*models.RegistryNamespace, error) {
+	resp, err := mongodb.NewRegistryNamespaceColl().FindByProject(projectName)
+	if err != nil {
+		log.Errorf("RegistryNamespace.List error: %s", err)
+		return resp, fmt.Errorf("RegistryNamespace.List error: %s", err)
+	}
+
+	return resp, nil
 }
 
 func ListRegistryNamespaces(encryptedKey string, getRealCredential bool, log *zap.SugaredLogger) ([]*models.RegistryNamespace, error) {

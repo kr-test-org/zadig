@@ -19,17 +19,20 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
 
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/workflow"
-	internalhandler "github.com/koderover/zadig/pkg/shared/handler"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	"github.com/koderover/zadig/pkg/tool/log"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/workflow/service/workflow"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	internalhandler "github.com/koderover/zadig/v2/pkg/shared/handler"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/types"
 )
 
 func GetWorkflowProductName(c *gin.Context) {
@@ -60,15 +63,62 @@ func GetProductNameByWorkflow(c *gin.Context) {
 }
 
 func AutoCreateWorkflow(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
-	ctx.Resp = workflow.AutoCreateWorkflow(c.Param("productName"), ctx.Logger)
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
+
+	projectKey := c.Param("productName")
+
+	// TODO: Authorization leak
+	// this API is sometimes used in edit/create workflow scenario, thus giving the edit/create workflow permission
+	// authorization check
+	permitted := false
+
+	if ctx.Resources.IsSystemAdmin {
+		permitted = true
+	} else if projectAuthInfo, ok := ctx.Resources.ProjectAuthInfo[projectKey]; ok {
+		// first check if the user is projectAdmin
+		if projectAuthInfo.IsProjectAdmin {
+			permitted = true
+		}
+
+		// then check if user has edit workflow permission
+		if projectAuthInfo.Workflow.Create ||
+			projectAuthInfo.Env.EditConfig {
+			permitted = true
+		}
+
+		// finally check if the permission is given by collaboration mode
+		collaborationAuthorizedEdit, err := internalhandler.CheckPermissionGivenByCollaborationMode(ctx.UserID, projectKey, types.ResourceTypeEnvironment, types.EnvActionEditConfig)
+		if err == nil && collaborationAuthorizedEdit {
+			permitted = true
+		}
+	}
+
+	if !permitted {
+		ctx.UnAuthorized = true
+		return
+	}
+
+	ctx.Resp = workflow.AutoCreateWorkflow(projectKey, ctx.Logger)
 }
 
 func CreateWorkflow(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
 
 	args := new(commonmodels.Workflow)
 	data, err := c.GetRawData()
@@ -78,8 +128,26 @@ func CreateWorkflow(c *gin.Context) {
 	if err = json.Unmarshal(data, args); err != nil {
 		log.Errorf("CreateWorkflow json.Unmarshal err : %v", err)
 	}
-	internalhandler.InsertOperationLog(c, ctx.UserName, args.ProductTmplName, "新增", "工作流", args.Name, string(data), ctx.Logger)
+
+	projectKey := args.ProductTmplName
+	workflowName := args.Name
+
+	internalhandler.InsertOperationLog(c, ctx.UserName, projectKey, "新增", "工作流", workflowName, string(data), ctx.Logger)
 	c.Request.Body = io.NopCloser(bytes.NewBuffer(data))
+
+	// authorization check
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[projectKey]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+
+		if !ctx.Resources.ProjectAuthInfo[projectKey].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[projectKey].Workflow.Create {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
 
 	if err := c.ShouldBindWith(&args, binding.JSON); err != nil {
 		ctx.Err = e.ErrInvalidParam.AddDesc(err.Error())
@@ -87,13 +155,33 @@ func CreateWorkflow(c *gin.Context) {
 	}
 	args.UpdateBy = ctx.UserName
 	args.CreateBy = ctx.UserName
-	ctx.Err = workflow.CreateWorkflow(args, ctx.Logger)
+	if err := workflow.CreateWorkflow(args, ctx.Logger); err != nil {
+		ctx.Err = err
+		return
+	}
+
+	if view := c.Query("viewName"); view != "" {
+		workflow.AddWorkflowToView(args.ProductTmplName, view, []*commonmodels.WorkflowViewDetail{
+			{
+				WorkflowName:        args.Name,
+				WorkflowDisplayName: args.DisplayName,
+				WorkflowType:        setting.ProductWorkflowType,
+			},
+		}, ctx.Logger)
+	}
 }
 
 // UpdateWorkflow  update a workflow
 func UpdateWorkflow(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
 
 	args := new(commonmodels.Workflow)
 	data, err := c.GetRawData()
@@ -103,8 +191,30 @@ func UpdateWorkflow(c *gin.Context) {
 	if err = json.Unmarshal(data, args); err != nil {
 		log.Errorf("UpdateWorkflow json.Unmarshal err : %v", err)
 	}
-	internalhandler.InsertOperationLog(c, ctx.UserName, args.ProductTmplName, "更新", "工作流", args.Name, string(data), ctx.Logger)
+
+	projectKey := args.ProductTmplName
+	workflowName := args.Name
+
+	internalhandler.InsertOperationLog(c, ctx.UserName, projectKey, "更新", "工作流", workflowName, string(data), ctx.Logger)
 	c.Request.Body = io.NopCloser(bytes.NewBuffer(data))
+
+	// authorization check
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[projectKey]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+
+		if !ctx.Resources.ProjectAuthInfo[projectKey].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[projectKey].Workflow.Edit {
+			// check if the permission is given by collaboration mode
+			permitted, err := internalhandler.GetCollaborationModePermission(ctx.UserID, projectKey, types.ResourceTypeWorkflow, args.Name, types.WorkflowActionEdit)
+			if err != nil || !permitted {
+				ctx.UnAuthorized = true
+				return
+			}
+		}
+	}
 
 	if err := c.ShouldBindWith(&args, binding.JSON); err != nil {
 		ctx.Err = e.ErrInvalidParam.AddDesc(err.Error())
@@ -137,6 +247,7 @@ func ListWorkflows(c *gin.Context) {
 	ctx.Resp, ctx.Err = workflow.ListWorkflows(projects, ctx.UserID, workflowNames, ctx.Logger)
 }
 
+// TODO: this API is used only by picket, should be removed later
 func ListTestWorkflows(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
@@ -146,18 +257,76 @@ func ListTestWorkflows(c *gin.Context) {
 
 // FindWorkflow find a workflow
 func FindWorkflow(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
-	ctx.Resp, ctx.Err = workflow.FindWorkflow(c.Param("name"), ctx.Logger)
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
+
+	workflowName := c.Param("name")
+
+	w, err := workflow.FindWorkflow(workflowName, ctx.Logger)
+	if err != nil {
+		ctx.Logger.Errorf("FindWorkflow error: %v", err)
+		ctx.Err = e.ErrInvalidParam.AddErr(err)
+		return
+	}
+
+	// authorization check
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[w.ProductTmplName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+
+		if !ctx.Resources.ProjectAuthInfo[w.ProductTmplName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[w.ProductTmplName].Workflow.View {
+			// check if the permission is given by collaboration mode
+			permitted, err := internalhandler.GetCollaborationModePermission(ctx.UserID, w.ProductTmplName, types.ResourceTypeWorkflow, workflowName, types.WorkflowActionView)
+			if err != nil || !permitted {
+				ctx.UnAuthorized = true
+				return
+			}
+		}
+	}
+
+	ctx.Resp = w
 }
 
 func DeleteWorkflow(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
-	internalhandler.InsertOperationLog(c, ctx.UserName, c.GetString("productName"), "删除", "工作流", c.Param("name"), "", ctx.Logger)
-	ctx.Err = commonservice.DeleteWorkflow(c.Param("name"), ctx.RequestID, false, ctx.Logger)
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
+
+	projectKey := c.GetString("productName")
+	workflowName := c.Param("name")
+
+	// authorization check
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[projectKey]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+
+		if !ctx.Resources.ProjectAuthInfo[projectKey].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[projectKey].Workflow.Delete {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
+
+	internalhandler.InsertOperationLog(c, ctx.UserName, projectKey, "删除", "工作流", workflowName, "", ctx.Logger)
+	ctx.Err = commonservice.DeleteWorkflow(workflowName, ctx.RequestID, false, ctx.Logger)
 }
 
 func PreSetWorkflow(c *gin.Context) {
@@ -168,8 +337,50 @@ func PreSetWorkflow(c *gin.Context) {
 }
 
 func CopyWorkflow(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
-	ctx.Err = workflow.CopyWorkflow(c.Param("old"), c.Param("new"), c.Param("newDisplay"), ctx.UserName, ctx.Logger)
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
+
+	workflowName := c.Param("old")
+
+	w, err := workflow.FindWorkflow(workflowName, ctx.Logger)
+	if err != nil {
+		ctx.Logger.Errorf("FindWorkflow error: %v", err)
+		ctx.Err = e.ErrInvalidParam.AddErr(err)
+		return
+	}
+
+	// authorization check
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[w.ProductTmplName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+
+		if !ctx.Resources.ProjectAuthInfo[w.ProductTmplName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[w.ProductTmplName].Workflow.Create {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
+
+	ctx.Err = workflow.CopyWorkflow(workflowName, c.Param("new"), c.Param("newDisplay"), ctx.UserName, ctx.Logger)
+}
+
+// @Summary [DONT USE]  ZadigDeployJobSpec
+// @Description [DONT USE] ZadigDeployJobSpec
+// @Tags 	placeholder
+// @Accept 	json
+// @Produce json
+// @Param 	deploy_job_spec 			body 		 commonmodels.ZadigDeployJobSpec	true 	"body"
+// @Success 200
+// @Router /api/aslan/placeholder/deploy_job_spec [post]
+func Placeholder(c *gin.Context) {
+
 }

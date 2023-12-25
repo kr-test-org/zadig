@@ -22,8 +22,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
 )
 
 type StepCtl interface {
@@ -75,6 +75,8 @@ func instantiateStepCtl(step *commonmodels.StepTask, workflowCtx *commonmodels.W
 		stepCtl, err = NewGitCtl(step, logger)
 	case config.StepShell:
 		stepCtl, err = NewShellCtl(step, logger)
+	case config.StepBatchFile:
+		stepCtl, err = NewBatchFileCtl(step, logger)
 	case config.StepDockerBuild:
 		stepCtl, err = NewDockerBuildCtl(step, logger)
 	case config.StepTools:

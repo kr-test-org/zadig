@@ -28,13 +28,13 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/koderover/zadig/pkg/microservice/jenkinsplugin/core/service"
-	"github.com/koderover/zadig/pkg/microservice/warpdrive/config"
-	"github.com/koderover/zadig/pkg/microservice/warpdrive/core/service/types/task"
-	"github.com/koderover/zadig/pkg/setting"
-	krkubeclient "github.com/koderover/zadig/pkg/tool/kube/client"
-	"github.com/koderover/zadig/pkg/tool/kube/label"
-	"github.com/koderover/zadig/pkg/tool/kube/updater"
+	"github.com/koderover/zadig/v2/pkg/microservice/jenkinsplugin/core/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/warpdrive/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/warpdrive/core/service/types/task"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	krkubeclient "github.com/koderover/zadig/v2/pkg/tool/kube/client"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/label"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/updater"
 )
 
 const (
@@ -166,7 +166,7 @@ func (j *JenkinsBuildPlugin) Run(ctx context.Context, pipelineTask *task.Task, p
 	j.Log.Infof("succeed to create cm for jenkins build job %s", j.JobName)
 	j.Task.Registries = getMatchedRegistries(pipelineTask.ConfigPayload.JenkinsBuildConfig.JenkinsBuildImage, j.Task.Registries)
 
-	job, err := buildJob(j.Type(), pipelineTask.ConfigPayload.JenkinsBuildConfig.JenkinsBuildImage, j.JobName, serviceName, "", pipelineTask.ConfigPayload.Build.KubeNamespace, setting.MinRequest, setting.MinRequestSpec, pipelineCtx, pipelineTask, j.Task.Registries)
+	job, err := buildJob(j.Type(), pipelineTask.ConfigPayload.JenkinsBuildConfig.JenkinsBuildImage, j.JobName, serviceName, "", "", pipelineTask.ConfigPayload.Build.KubeNamespace, setting.MinRequest, setting.MinRequestSpec, pipelineCtx, pipelineTask, j.Task.Registries)
 	if err != nil {
 		msg := fmt.Sprintf("create jenkins build job context error: %v", err)
 		j.Log.Error(msg)

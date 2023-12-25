@@ -17,22 +17,25 @@ limitations under the License.
 package jobcontroller
 
 import (
+	"context"
 	"sync"
+	"time"
 
 	"github.com/pkg/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-	"github.com/koderover/zadig/pkg/util/converter"
-
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models/template"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	templaterepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb/template"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/render"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/repository"
-	commonutil "github.com/koderover/zadig/pkg/microservice/aslan/core/common/util"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/util/yaml"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models/template"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	templaterepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb/template"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/kube"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/repository"
+	commontypes "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/types"
+	commonutil "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/util"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/tool/mongo"
+	"github.com/koderover/zadig/v2/pkg/util/converter"
 )
 
 type ProductServiceDeployInfo struct {
@@ -42,8 +45,11 @@ type ProductServiceDeployInfo struct {
 	Uninstall             bool
 	ServiceRevision       int
 	VariableYaml          string
+	VariableKVs           []*commontypes.RenderVariableKV
 	Containers            []*models.Container
 	UpdateServiceRevision bool
+	UserName              string
+	Resources             []*unstructured.Unstructured
 }
 
 func mergeContainers(currentContainer []*models.Container, newContainers ...[]*models.Container) []*models.Container {
@@ -54,7 +60,12 @@ func mergeContainers(currentContainer []*models.Container, newContainers ...[]*m
 
 	for _, containers := range newContainers {
 		for _, container := range containers {
-			containerMap[container.Name] = container
+			if curContainer, ok := containerMap[container.Name]; ok {
+				curContainer.Image = container.Image
+				curContainer.ImageName = container.ImageName
+			} else {
+				containerMap[container.Name] = container
+			}
 		}
 	}
 
@@ -103,30 +114,23 @@ func UpdateProductServiceDeployInfo(deployInfo *ProductServiceDeployInfo) error 
 		return errors.Wrapf(err, "failed to find service %s in product %s", deployInfo.ServiceName, deployInfo.ProductName)
 	}
 
-	curRenderset, err := commonrepo.NewRenderSetColl().Find(&commonrepo.RenderSetFindOption{
-		ProductTmpl: deployInfo.ProductName,
-		EnvName:     deployInfo.EnvName,
-		IsDefault:   false,
-		Revision:    productInfo.Render.Revision,
-		Name:        productInfo.Render.Name,
-	})
-	if err != nil {
-		return errors.Wrapf(err, "failed to find renderset for %s/%s", deployInfo.ProductName, deployInfo.EnvName)
-	}
-
-	var svcRender *template.ServiceRender
-	for _, sRender := range curRenderset.ServiceVariables {
-		if sRender.ServiceName == deployInfo.ServiceName {
-			svcRender = sRender
-			break
-		}
-	}
+	svcRender := productInfo.GetSvcRender(deployInfo.ServiceName)
 
 	if len(productInfo.Services) == 0 {
+		// DO NOT REMOVE []*models.ProductService{}, it's for compatibility
 		productInfo.Services = [][]*models.ProductService{[]*models.ProductService{}}
 	}
 
+	session := mongo.Session()
+	defer session.EndSession(context.TODO())
+
+	err = mongo.StartTransaction(session)
+	if err != nil {
+		return err
+	}
+
 	if !deployInfo.Uninstall {
+		// install or update service
 		sevOnline := false
 		productSvc := productInfo.GetServiceMap()[deployInfo.ServiceName]
 		if productSvc == nil {
@@ -137,50 +141,50 @@ func UpdateProductServiceDeployInfo(deployInfo *ProductServiceDeployInfo) error 
 			}
 			productInfo.Services[0] = append(productInfo.Services[0], productSvc)
 			sevOnline = true
+			productSvc.Render = svcRender
 		}
-		if svcRender == nil {
-			svcRender = &template.ServiceRender{
-				ServiceName:  deployInfo.ServiceName,
-				OverrideYaml: &template.CustomYaml{},
-			}
-			curRenderset.ServiceVariables = append(curRenderset.ServiceVariables, svcRender)
-		}
+		productSvc.UpdateTime = time.Now().Unix()
 
-		mergedVariable := deployInfo.VariableYaml
-		if svcRender.OverrideYaml != nil {
-			svcRender.OverrideYaml.YamlContent = commonutil.ClipVariableYamlNoErr(svcRender.OverrideYaml.YamlContent, svcTemplate.ServiceVars)
-			mergedVariableBs, err := yaml.Merge([][]byte{[]byte(svcRender.OverrideYaml.YamlContent), []byte(deployInfo.VariableYaml)})
+		// merge render variables and deploy variables
+		mergedVariableYaml := deployInfo.VariableYaml
+		mergedVariableKVs := deployInfo.VariableKVs
+		if svcRender.OverrideYaml != nil && svcTemplate.Type == setting.K8SDeployType {
+			templateVarKVs := commontypes.ServiceToRenderVariableKVs(svcTemplate.ServiceVariableKVs)
+			_, mergedVariableKVs, err = commontypes.MergeRenderVariableKVs(templateVarKVs, svcRender.OverrideYaml.RenderVariableKVs, deployInfo.VariableKVs)
 			if err != nil {
-				return errors.Wrapf(err, "failed to merge variable yaml for %s/%s", deployInfo.ProductName, deployInfo.EnvName)
+				mongo.AbortTransaction(session)
+				return errors.Wrapf(err, "failed to merge render variable kv for %s/%s, %s", deployInfo.ProductName, deployInfo.EnvName, deployInfo.ServiceName)
 			}
-			mergedVariable = string(mergedVariableBs)
+			mergedVariableYaml, mergedVariableKVs, err = commontypes.ClipRenderVariableKVs(svcTemplate.ServiceVariableKVs, mergedVariableKVs)
+			if err != nil {
+				mongo.AbortTransaction(session)
+				return errors.Wrapf(err, "failed to clip render variable kv for %s/%s, %s", deployInfo.ProductName, deployInfo.EnvName, deployInfo.ServiceName)
+			}
+		}
+		svcRender.OverrideYaml = &template.CustomYaml{
+			YamlContent:       mergedVariableYaml,
+			RenderVariableKVs: mergedVariableKVs,
 		}
 
+		// update product info
 		productSvc.Containers = mergeContainers(svcTemplate.Containers, productSvc.Containers, deployInfo.Containers)
 		productSvc.Revision = int64(deployInfo.ServiceRevision)
-		svcRender.OverrideYaml = &template.CustomYaml{
-			YamlContent: mergedVariable,
-		}
-
-		err = render.CreateRenderSet(curRenderset, log.SugaredLogger())
-		if err != nil {
-			return errors.Wrapf(err, "failed to update renderset for %s/%s", deployInfo.ProductName, deployInfo.EnvName)
-		}
-		productInfo.Render.Revision = curRenderset.Revision
+		productSvc.Resources = kube.UnstructuredToResources(deployInfo.Resources)
 		log.Infof("UpdateServiceRevision : %v, sevOnline: %v, variableYamlNil %v, serviceName: %s", deployInfo.UpdateServiceRevision, sevOnline, variableYamlNil(deployInfo.VariableYaml), deployInfo.ServiceName)
 		if deployInfo.UpdateServiceRevision || sevOnline || !variableYamlNil(deployInfo.VariableYaml) {
-			productInfo.ServiceDeployStrategy[deployInfo.ServiceName] = setting.ServiceDeployStrategyDeploy
+			productInfo.ServiceDeployStrategy = commonutil.SetServiceDeployStrategyDepoly(productInfo.ServiceDeployStrategy, deployInfo.ServiceName)
+		}
+
+		err = commonutil.CreateEnvServiceVersion(productInfo, productInfo.GetServiceMap()[deployInfo.ServiceName], deployInfo.UserName, session, log.SugaredLogger())
+		if err != nil {
+			log.Errorf("CreateK8SEnvServiceVersion error: %v", err)
 		}
 	} else {
-		filteredRenders := make([]*template.ServiceRender, 0)
-		for _, svcRender := range curRenderset.ServiceVariables {
-			if svcRender.ServiceName == deployInfo.ServiceName {
-				continue
-			}
-			filteredRenders = append(filteredRenders, svcRender)
-		}
-		curRenderset.ServiceVariables = filteredRenders
+		// uninstall service
+		// update render set
+		productInfo.GlobalVariables = commontypes.RemoveGlobalVariableRelatedService(productInfo.GlobalVariables, svcRender.ServiceName)
 
+		// update product service
 		svcGroups := make([][]*models.ProductService, 0)
 		for _, svcGroup := range productInfo.Services {
 			newGroup := make([]*models.ProductService, 0)
@@ -194,21 +198,18 @@ func UpdateProductServiceDeployInfo(deployInfo *ProductServiceDeployInfo) error 
 		}
 		productInfo.Services = svcGroups
 
+		// update service deploy strategy
 		for svcName := range productInfo.ServiceDeployStrategy {
 			if svcName == deployInfo.ServiceName {
 				delete(productInfo.ServiceDeployStrategy, svcName)
 			}
 		}
-
-		err = commonrepo.NewRenderSetColl().Update(curRenderset)
-		if err != nil {
-			return errors.Wrapf(err, "failed to update renderset for %s/%s", deployInfo.ProductName, deployInfo.EnvName)
-		}
 	}
 
-	err = commonrepo.NewProductColl().Update(productInfo)
+	err = commonrepo.NewProductCollWithSession(session).Update(productInfo)
 	if err != nil {
+		mongo.AbortTransaction(session)
 		return errors.Wrapf(err, "failed to update product %s", deployInfo.ProductName)
 	}
-	return nil
+	return mongo.CommitTransaction(session)
 }

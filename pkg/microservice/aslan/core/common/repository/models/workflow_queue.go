@@ -19,7 +19,7 @@ package models
 import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
 )
 
 type WorkflowQueue struct {
@@ -33,7 +33,6 @@ type WorkflowQueue struct {
 	TaskCreator         string             `bson:"task_creator"                               json:"task_creator,omitempty"`
 	TaskRevoker         string             `bson:"task_revoker,omitempty"                     json:"task_revoker,omitempty"`
 	CreateTime          int64              `bson:"create_time"                                json:"create_time,omitempty"`
-	MultiRun            bool               `bson:"multi_run"                                  json:"multi_run"`
 }
 
 func (WorkflowQueue) TableName() string {

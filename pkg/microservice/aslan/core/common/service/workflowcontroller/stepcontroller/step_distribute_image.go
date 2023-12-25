@@ -24,9 +24,9 @@ import (
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v2"
 
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/types/job"
-	"github.com/koderover/zadig/pkg/types/step"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/types/job"
+	"github.com/koderover/zadig/v2/pkg/types/step"
 )
 
 type distributeImageCtl struct {
@@ -52,9 +52,23 @@ func NewDistributeCtl(stepTask *commonmodels.StepTask, workflowCtx *commonmodels
 
 func (s *distributeImageCtl) PreRun(ctx context.Context) error {
 	for _, target := range s.distributeImageSpec.DistributeTarget {
-		target.TargetImage = getImage(target.ServiceModule, target.TargetTag, s.distributeImageSpec.TargetRegistry)
+		if target.SourceImage == "" {
+			return fmt.Errorf("source image is empty")
+		}
+
+		// for exmaple, target.SourceImage = koderover.tencentcloudcr.com/test/service1:20231026142000-6-main
+		sourceImageName := strings.Split(target.SourceImage, ":")[0]
+		count := strings.Count(target.SourceImage, ":")
+		if count == 2 {
+			// for exmaple, target.SourceImage = 2.192.49.92:9392/test/service1:20231026142000-6-main
+			sourceImageName = strings.Split(target.SourceImage, ":")[1]
+		}
+		if idx := strings.LastIndex(sourceImageName, "/"); idx != -1 {
+			sourceImageName = sourceImageName[idx+1:]
+		}
+		target.TargetImage = getImage(sourceImageName, target.TargetTag, s.distributeImageSpec.TargetRegistry)
 		if !target.UpdateTag {
-			target.TargetImage = getImage(target.ServiceModule, getImageTag(target.SoureImage), s.distributeImageSpec.TargetRegistry)
+			target.TargetImage = getImage(sourceImageName, getImageTag(target.SourceImage), s.distributeImageSpec.TargetRegistry)
 		}
 	}
 	s.step.Spec = s.distributeImageSpec

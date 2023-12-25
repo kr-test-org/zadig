@@ -19,6 +19,7 @@ package util
 import (
 	"io/ioutil"
 	"os"
+	"path/filepath"
 )
 
 func GenerateTmpFile() (string, error) {
@@ -34,11 +35,29 @@ func GenerateTmpFile() (string, error) {
 	return tmpFile.Name(), nil
 }
 
+func CreateFileInCurrentDir(filename string) (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+
+	filePath := filepath.Join(dir, filename)
+	f, err := os.Create(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	return filePath, nil
+}
+
 func WriteFile(filename string, data []byte, perm os.FileMode) error {
 	f, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR|os.O_APPEND, perm)
 	if err != nil {
 		return err
 	}
+	defer f.Close()
+
 	if _, err := f.Write(data); err != nil {
 		return err
 	}

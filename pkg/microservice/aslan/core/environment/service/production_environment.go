@@ -17,68 +17,50 @@ limitations under the License.
 package service
 
 import (
+	"context"
 	"fmt"
 	"time"
-
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/notify"
 
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 	"helm.sh/helm/v3/pkg/releaseutil"
+	versionedclient "istio.io/client-go/pkg/clientset/versioned"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/collaboration"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/kube"
-	"github.com/koderover/zadig/pkg/setting"
-	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	"github.com/koderover/zadig/pkg/tool/kube/getter"
-	"github.com/koderover/zadig/pkg/tool/kube/informer"
-	"github.com/koderover/zadig/pkg/tool/kube/serializer"
-	"github.com/koderover/zadig/pkg/util"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/collaboration"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/kube"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/notify"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	kubeclient "github.com/koderover/zadig/v2/pkg/shared/kube/client"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/getter"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/informer"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/serializer"
+	"github.com/koderover/zadig/v2/pkg/util"
 )
 
 func ListProductionEnvs(userId string, projectName string, envNames []string, log *zap.SugaredLogger) ([]*EnvResp, error) {
-	return ListProducts(userId, projectName, envNames, true, log)
+	envs, err := ListProducts(userId, projectName, envNames, true, log)
+	if err != nil {
+		return nil, err
+	}
+	for _, env := range envs {
+		relatedEnvs, err := commonrepo.NewProductColl().ListEnvByNamespace(env.ClusterID, env.Namespace)
+		if err != nil {
+			continue
+		}
+		if len(relatedEnvs) > 1 {
+			env.SharedNS = true
+		}
+	}
+	return envs, nil
 }
 
-// ListProductionGroups TODO we need to verify if the access to the production environment is allowed
 func ListProductionGroups(serviceName, envName, productName string, perPage, page int, log *zap.SugaredLogger) ([]*commonservice.ServiceResp, int, error) {
 	return ListGroups(serviceName, envName, productName, perPage, page, true, log)
-}
-
-func GetServiceInProductionEnv(envName, productName, serviceName string, workLoadType string, log *zap.SugaredLogger) (ret *SvcResp, err error) {
-	opt := &commonrepo.ProductFindOptions{Name: productName, EnvName: envName, Production: util.GetBoolPointer(true)}
-	env, err := commonrepo.NewProductColl().Find(opt)
-	if err != nil {
-		return nil, e.ErrGetService.AddErr(errors.Wrapf(err, "failed to find env %s/%s", productName, envName))
-	}
-
-	kubeClient, err := kubeclient.GetKubeClient(config.HubServerAddress(), env.ClusterID)
-	if err != nil {
-		return nil, e.ErrGetService.AddErr(errors.Wrapf(err, "failed to create kubernetes client for cluster id: %s", env.ClusterID))
-	}
-
-	clientset, err := kubeclient.GetKubeClientSet(config.HubServerAddress(), env.ClusterID)
-	if err != nil {
-		log.Errorf("Failed to create kubernetes clientset for cluster id: %s, the error is: %s", env.ClusterID, err)
-		return nil, e.ErrGetService.AddErr(err)
-	}
-
-	inf, err := informer.NewInformer(env.ClusterID, env.Namespace, clientset)
-	if err != nil {
-		log.Errorf("Failed to create informer for namespace [%s] in cluster [%s], the error is: %s", env.Namespace, env.ClusterID, err)
-		return nil, e.ErrGetService.AddErr(err)
-	}
-
-	ret, err = GetServiceImpl(serviceName, workLoadType, env, kubeClient, clientset, inf, log)
-	if err != nil {
-		return nil, e.ErrGetService.AddErr(err)
-	}
-	ret.Workloads = nil
-	return ret, nil
 }
 
 func ExportProductionYaml(envName, productName, serviceName string, log *zap.SugaredLogger) ([]string, error) {
@@ -105,18 +87,7 @@ func ExportProductionYaml(envName, productName, serviceName string, log *zap.Sug
 		return res, errors.Wrapf(err, "failed to init kube client for cluster %s", env.ClusterID)
 	}
 
-	opt := &commonrepo.RenderSetFindOption{
-		Name:        env.Render.Name,
-		Revision:    env.Render.Revision,
-		EnvName:     env.EnvName,
-		ProductTmpl: env.ProductName,
-	}
-	renderset, exists, err := commonrepo.NewRenderSetColl().FindRenderSet(opt)
-	if err != nil || !exists {
-		log.Errorf("failed to find renderset for env: %s, err: %v", envName, err)
-		return res, errors.Wrapf(err, "failed to find renderset for env: %s", envName)
-	}
-	rederedYaml, err := kube.RenderEnvService(env, renderset, productService)
+	rederedYaml, err := kube.RenderEnvService(env, productService.GetServiceRender(), productService)
 	if err != nil {
 		log.Errorf("failed to render service yaml, err: %s", err)
 		return res, errors.Wrapf(err, "failed to render service yaml")
@@ -130,7 +101,7 @@ func ExportProductionYaml(envName, productName, serviceName string, log *zap.Sug
 			continue
 		}
 		switch u.GetKind() {
-		case setting.Deployment, setting.StatefulSet, setting.ConfigMap, setting.Service, setting.Ingress:
+		case setting.Deployment, setting.StatefulSet, setting.ConfigMap, setting.Service, setting.Ingress, setting.CronJob:
 			resource, exists, err := getter.GetResourceYamlInCache(namespace, u.GetName(), u.GroupVersionKind(), kubeClient)
 			if err != nil {
 				log.Errorf("failed to get resource yaml, err: %s", err)
@@ -154,7 +125,7 @@ func DeleteProductionProduct(username, envName, productName, requestID string, l
 	productInfo, err := commonrepo.NewProductColl().Find(&commonrepo.ProductFindOptions{Name: productName, EnvName: envName, Production: util.GetBoolPointer(true)})
 	if err != nil {
 		log.Errorf("find product error: %v", err)
-		return e.ErrDeleteEnv.AddErr(errors.Wrapf(err, "find product %s error", productName))
+		return e.ErrDeleteEnv.AddErr(errors.Wrapf(err, "failed to find product from db, project:%s envName:%s error:%v", productName, envName, err))
 	}
 
 	// delete informer's cache
@@ -187,5 +158,50 @@ func DeleteProductionProduct(username, envName, productName, requestID string, l
 		content := fmt.Sprintf("namespace:%s", productInfo.Namespace)
 		notify.SendMessage(username, title, content, requestID, log)
 	}
+
+	// remove custom labels
+	err = service.DeleteZadigLabelFromNamespace(productInfo.Namespace, productInfo.ClusterID, log)
+	if err != nil {
+		log.Errorf("failed to delete zadig label from namespace %s, error: %v", productInfo.Namespace, err)
+	}
+
+	if productInfo.IstioGrayscale.Enable && !productInfo.IstioGrayscale.IsBase {
+		ctx := context.TODO()
+		clusterID := productInfo.ClusterID
+
+		kclient, err := kubeclient.GetKubeClient(config.HubServerAddress(), clusterID)
+		if err != nil {
+			return fmt.Errorf("failed to get kube client: %s", err)
+		}
+
+		restConfig, err := kubeclient.GetRESTConfig(config.HubServerAddress(), clusterID)
+		if err != nil {
+			return fmt.Errorf("failed to get rest config: %s", err)
+		}
+
+		istioClient, err := versionedclient.NewForConfig(restConfig)
+		if err != nil {
+			return fmt.Errorf("failed to new istio client: %s", err)
+		}
+
+		// Delete all VirtualServices delivered by the Zadig.
+		err = deleteVirtualServices(ctx, kclient, istioClient, productInfo.Namespace)
+		if err != nil {
+			return fmt.Errorf("failed to delete VirtualServices that Zadig created in ns `%s`: %s", productInfo.Namespace, err)
+		}
+
+		// Remove the `istio-injection=enabled` label of the namespace.
+		err = removeIstioLabel(ctx, kclient, productInfo.Namespace)
+		if err != nil {
+			return fmt.Errorf("failed to remove istio label on ns `%s`: %s", productInfo.Namespace, err)
+		}
+
+		// Restart the istio-Proxy injected Pods.
+		err = removePodsIstioProxy(ctx, kclient, productInfo.Namespace)
+		if err != nil {
+			return fmt.Errorf("failed to remove istio-proxy from pods in ns `%s`: %s", productInfo.Namespace, err)
+		}
+	}
+
 	return nil
 }

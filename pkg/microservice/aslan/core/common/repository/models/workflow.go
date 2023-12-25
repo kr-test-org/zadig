@@ -21,10 +21,10 @@ import (
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	"github.com/koderover/zadig/pkg/setting"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	"github.com/koderover/zadig/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/types"
 )
 
 type Workflow struct {
@@ -74,6 +74,7 @@ type WorkflowHook struct {
 	MainRepo            *MainHookRepo     `bson:"main_repo"                 json:"main_repo"`
 	WorkflowArgs        *WorkflowTaskArgs `bson:"workflow_args"             json:"workflow_args"`
 	IsYaml              bool              `bson:"is_yaml,omitempty"         json:"is_yaml,omitempty"`
+	IsManual            bool              `bson:"is_manual,omitempty"       json:"is_manual,omitempty"`
 	YamlPath            string            `bson:"yaml_path,omitempty"       json:"yaml_path,omitempty"`
 }
 
@@ -116,18 +117,20 @@ type ScheduleCtrl struct {
 }
 
 type Schedule struct {
-	ID             primitive.ObjectID  `bson:"_id,omitempty"                 json:"id,omitempty"`
-	Number         uint64              `bson:"number"                        json:"number"`
-	Frequency      string              `bson:"frequency"                     json:"frequency"`
-	Time           string              `bson:"time"                          json:"time"`
-	MaxFailures    int                 `bson:"max_failures,omitempty"        json:"max_failures,omitempty"`
-	TaskArgs       *TaskArgs           `bson:"task_args,omitempty"           json:"task_args,omitempty"`
-	WorkflowArgs   *WorkflowTaskArgs   `bson:"workflow_args,omitempty"       json:"workflow_args,omitempty"`
-	TestArgs       *TestTaskArgs       `bson:"test_args,omitempty"           json:"test_args,omitempty"`
-	WorkflowV4Args *WorkflowV4         `bson:"workflow_v4_args"              json:"workflow_v4_args"`
-	Type           config.ScheduleType `bson:"type"                          json:"type"`
-	Cron           string              `bson:"cron"                          json:"cron"`
-	IsModified     bool                `bson:"-"                             json:"-"`
+	ID              primitive.ObjectID  `bson:"_id,omitempty"                 json:"id,omitempty"`
+	Number          uint64              `bson:"number"                        json:"number"`
+	Frequency       string              `bson:"frequency"                     json:"frequency"`
+	Time            string              `bson:"time"                          json:"time"`
+	MaxFailures     int                 `bson:"max_failures,omitempty"        json:"max_failures,omitempty"`
+	TaskArgs        *TaskArgs           `bson:"task_args,omitempty"           json:"task_args,omitempty"`
+	WorkflowArgs    *WorkflowTaskArgs   `bson:"workflow_args,omitempty"       json:"workflow_args,omitempty"`
+	TestArgs        *TestTaskArgs       `bson:"test_args,omitempty"           json:"test_args,omitempty"`
+	WorkflowV4Args  *WorkflowV4         `bson:"workflow_v4_args"              json:"workflow_v4_args"`
+	EnvAnalysisArgs *EnvArgs            `bson:"env_analysis_args,omitempty"   json:"env_analysis_args,omitempty"`
+	EnvArgs         *EnvArgs            `bson:"env_args,omitempty"            json:"env_args,omitempty"`
+	Type            config.ScheduleType `bson:"type"                          json:"type"`
+	Cron            string              `bson:"cron"                          json:"cron"`
+	IsModified      bool                `bson:"-"                             json:"-"`
 	// 自由编排工作流的开关是放在schedule里面的
 	Enabled bool `bson:"enabled"                       json:"enabled"`
 }
@@ -231,6 +234,7 @@ type TestTaskArgs struct {
 	RepoNamespace  string `bson:"repo_namespace"   json:"repo_namespace"`
 	RepoName       string `bson:"repo_name"        json:"repo_name"`
 	Ref            string `bson:"ref" json:"ref"`
+	Branch         string `bson:"branch" json:"branch"`
 	EventType      string `bson:"event_type" json:"event_type"`
 }
 

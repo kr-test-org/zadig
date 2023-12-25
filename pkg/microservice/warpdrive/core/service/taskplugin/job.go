@@ -43,23 +43,23 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/koderover/zadig/pkg/microservice/warpdrive/config"
-	"github.com/koderover/zadig/pkg/microservice/warpdrive/core/service/taskplugin/s3"
-	"github.com/koderover/zadig/pkg/microservice/warpdrive/core/service/types"
-	"github.com/koderover/zadig/pkg/microservice/warpdrive/core/service/types/task"
-	"github.com/koderover/zadig/pkg/setting"
-	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
-	"github.com/koderover/zadig/pkg/shared/kube/wrapper"
-	"github.com/koderover/zadig/pkg/tool/kube/containerlog"
-	"github.com/koderover/zadig/pkg/tool/kube/getter"
-	"github.com/koderover/zadig/pkg/tool/kube/label"
-	"github.com/koderover/zadig/pkg/tool/kube/podexec"
-	"github.com/koderover/zadig/pkg/tool/kube/updater"
-	kubeutil "github.com/koderover/zadig/pkg/tool/kube/util"
-	"github.com/koderover/zadig/pkg/tool/log"
-	s3tool "github.com/koderover/zadig/pkg/tool/s3"
-	commontypes "github.com/koderover/zadig/pkg/types"
-	"github.com/koderover/zadig/pkg/util"
+	"github.com/koderover/zadig/v2/pkg/microservice/warpdrive/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/warpdrive/core/service/taskplugin/s3"
+	"github.com/koderover/zadig/v2/pkg/microservice/warpdrive/core/service/types"
+	"github.com/koderover/zadig/v2/pkg/microservice/warpdrive/core/service/types/task"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	kubeclient "github.com/koderover/zadig/v2/pkg/shared/kube/client"
+	"github.com/koderover/zadig/v2/pkg/shared/kube/wrapper"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/containerlog"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/getter"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/label"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/podexec"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/updater"
+	kubeutil "github.com/koderover/zadig/v2/pkg/tool/kube/util"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	s3tool "github.com/koderover/zadig/v2/pkg/tool/s3"
+	commontypes "github.com/koderover/zadig/v2/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/util"
 )
 
 const (
@@ -68,9 +68,11 @@ const (
 	JenkinsPlugin           = "jenkins-plugin"
 	PackagerPlugin          = "packager-plugin"
 	registrySecretSuffix    = "-registry-secret"
-	ResourceServer          = "resource-server"
 	DindServer              = "dind"
 	KoderoverAgentNamespace = "koderover-agent"
+
+	executorVolumeName = "executor-resource"
+	executorVolumePath = "/executor"
 
 	defaultRetryCount    = 3
 	defaultRetryInterval = time.Second * 3
@@ -125,7 +127,7 @@ func saveContainerLog(pipelineTask *task.Task, namespace, clusterID, fileName st
 		}()
 		if err = saveFile(buf, tempFileName); err == nil {
 			var store *s3.S3
-			if store, err = s3.NewS3StorageFromEncryptedURI(pipelineTask.StorageURI); err != nil {
+			if store, err = s3.UnmarshalNewS3StorageFromEncrypted(pipelineTask.StorageURI); err != nil {
 				log.Errorf("failed to Create S3 endpoint from Encrypted URI: %s, the error is: %s ", pipelineTask.StorageURI, err)
 				return err
 			}
@@ -242,6 +244,7 @@ func (b *JobCtxBuilder) BuildReaperContext(pipelineTask *task.Task, serviceName 
 			Bucket:   b.JobCtx.UploadStorageInfo.Bucket,
 			Insecure: b.JobCtx.UploadStorageInfo.Insecure,
 			Provider: b.JobCtx.UploadStorageInfo.Provider,
+			Region:   b.JobCtx.UploadStorageInfo.Region,
 		}
 	}
 
@@ -290,6 +293,7 @@ func (b *JobCtxBuilder) BuildReaperContext(pipelineTask *task.Task, serviceName 
 			AuthType:           build.AuthType,
 			SSHKey:             build.SSHKey,
 			PrivateAccessToken: build.PrivateAccessToken,
+			SubmissionID:       build.SubmissionID,
 		}
 		ctx.Repos = append(ctx.Repos, repo)
 	}
@@ -431,7 +435,7 @@ func createJobConfigMap(namespace, jobName string, jobLabel *label.JobLabel, job
 // "s-job":  pipelinename-taskid-tasktype-servicename,
 // "s-task": pipelinename-taskid,
 // "s-type": tasktype,
-func buildJob(taskType config.TaskType, jobImage, jobName, serviceName, clusterID, currentNamespace string, resReq setting.Request, resReqSpec setting.RequestSpec, ctx *task.PipelineCtx,
+func buildJob(taskType config.TaskType, jobImage, jobName, serviceName, clusterID, strategyID, currentNamespace string, resReq setting.Request, resReqSpec setting.RequestSpec, ctx *task.PipelineCtx,
 	pipelineTask *task.Task, registries []*task.RegistryNamespace) (*batchv1.Job, error) {
 	return buildJobWithLinkedNs(
 		taskType,
@@ -439,6 +443,7 @@ func buildJob(taskType config.TaskType, jobImage, jobName, serviceName, clusterI
 		jobName,
 		serviceName,
 		clusterID,
+		strategyID,
 		currentNamespace,
 		resReq,
 		resReqSpec,
@@ -448,27 +453,10 @@ func buildJob(taskType config.TaskType, jobImage, jobName, serviceName, clusterI
 	)
 }
 
-func buildJobWithLinkedNs(taskType config.TaskType, jobImage, jobName, serviceName, clusterID, currentNamespace string, resReq setting.Request, resReqSpec setting.RequestSpec, ctx *task.PipelineCtx, pipelineTask *task.Task, registries []*task.RegistryNamespace) (*batchv1.Job, error) {
-	var (
-		reaperBootingScript string
-		reaperBinaryFile    = pipelineTask.ConfigPayload.Release.ReaperBinaryFile
-	)
-	// not local cluster
-	if clusterID != "" && clusterID != setting.LocalClusterID {
-		reaperBinaryFile = strings.Replace(reaperBinaryFile, ResourceServer, ResourceServer+".koderover-agent", -1)
-	} else {
-		reaperBinaryFile = strings.Replace(reaperBinaryFile, ResourceServer, ResourceServer+"."+currentNamespace, -1)
-	}
+func buildJobWithLinkedNs(taskType config.TaskType, jobImage, jobName, serviceName, clusterID, strategyID, currentNamespace string, resReq setting.Request, resReqSpec setting.RequestSpec, ctx *task.PipelineCtx, pipelineTask *task.Task, registries []*task.RegistryNamespace) (*batchv1.Job, error) {
+	var reaperBootingScript string
 
-	if !strings.Contains(jobImage, PredatorPlugin) && !strings.Contains(jobImage, JenkinsPlugin) && !strings.Contains(jobImage, PackagerPlugin) {
-		reaperBootingScript = fmt.Sprintf("curl -m 10 --retry-delay 3 --retry 3 -sSL %s -o reaper && chmod +x reaper && mv reaper /usr/local/bin && /usr/local/bin/reaper", reaperBinaryFile)
-		if pipelineTask.ConfigPayload.Proxy.EnableApplicationProxy && pipelineTask.ConfigPayload.Proxy.Type == "http" {
-			reaperBootingScript = fmt.Sprintf("curl -m 10 --retry-delay 3 --retry 3 -sSL --proxy %s %s -o reaper && chmod +x reaper && mv reaper /usr/local/bin && /usr/local/bin/reaper",
-				pipelineTask.ConfigPayload.Proxy.GetProxyURL(),
-				reaperBinaryFile,
-			)
-		}
-	}
+	reaperBootingScript = executorVolumePath + "/reaper"
 
 	labels := label.GetJobLabels(&label.JobLabel{
 		PipelineName: pipelineTask.PipelineName,
@@ -514,6 +502,20 @@ func buildJobWithLinkedNs(taskType config.TaskType, jobImage, jobName, serviceNa
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
 					ImagePullSecrets: ImagePullSecrets,
+					InitContainers: []corev1.Container{
+						{
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Name:            "executor-resource-init",
+							Image:           config.ExecutorImage(),
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      executorVolumeName,
+									MountPath: executorVolumePath,
+								},
+							},
+							Command: []string{"/bin/sh", "-c", fmt.Sprintf("cp /app/* %s", executorVolumePath)},
+						},
+					},
 					Containers: []corev1.Container{
 						{
 							ImagePullPolicy:          corev1.PullAlways,
@@ -561,11 +563,11 @@ func buildJobWithLinkedNs(taskType config.TaskType, jobImage, jobName, serviceNa
 
 	clusterConfig := findClusterConfig(clusterID, pipelineTask.ConfigPayload.K8SClusters)
 
-	if affinity := addNodeAffinity(clusterConfig); affinity != nil {
+	if affinity := addNodeAffinity(clusterConfig, strategyID); affinity != nil {
 		job.Spec.Template.Spec.Affinity = affinity
 	}
 
-	if tolerations := buildTolerations(clusterConfig); len(tolerations) > 0 {
+	if tolerations := buildTolerations(clusterConfig, strategyID); len(tolerations) > 0 {
 		job.Spec.Template.Spec.Tolerations = tolerations
 	}
 
@@ -711,13 +713,17 @@ func getVolumeMounts(ctx *task.PipelineCtx) []corev1.VolumeMount {
 		Name:      "job-config",
 		MountPath: ctx.ConfigMapMountDir,
 	})
-
+	resp = append(resp, corev1.VolumeMount{
+		Name:      executorVolumeName,
+		MountPath: executorVolumePath,
+	})
 	if ctx.UseHostDockerDaemon {
 		resp = append(resp, corev1.VolumeMount{
 			Name:      "docker-sock",
 			MountPath: setting.DefaultDockSock,
 		})
 	}
+
 	return resp
 }
 
@@ -747,6 +753,12 @@ func getVolumes(jobName string, userHostDockerDaemon bool) []corev1.Volume {
 					Name: jobName,
 				},
 			},
+		},
+	})
+	resp = append(resp, corev1.Volume{
+		Name: executorVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		},
 	})
 
@@ -868,6 +880,8 @@ func waitJobReady(ctx context.Context, namespace, jobName string, kubeClient cli
 			return config.StatusTimeout, fmt.Errorf("wait job ready timeout")
 		case <-waitPodReadyTimeout:
 			podReadyTimeout = true
+		case <-ctx.Done():
+			return config.StatusCancelled, fmt.Errorf("cancel")
 		default:
 			time.Sleep(time.Second)
 
@@ -1073,13 +1087,24 @@ func checkDogFoodExistsInContainer(clientset kubernetes.Interface, restConfig *r
 	return commontypes.JobStatus(stdout), success, err
 }
 
-func buildTolerations(clusterConfig *task.AdvancedConfig) []corev1.Toleration {
+func buildTolerations(clusterConfig *task.AdvancedConfig, strategyID string) []corev1.Toleration {
 	ret := make([]corev1.Toleration, 0)
-	if clusterConfig == nil || len(clusterConfig.Tolerations) == 0 {
+	if clusterConfig == nil || len(clusterConfig.ScheduleStrategy) == 0 {
 		return ret
 	}
 
-	err := yaml.Unmarshal([]byte(clusterConfig.Tolerations), &ret)
+	var tolerations string
+	for _, strategy := range clusterConfig.ScheduleStrategy {
+		if strategyID != "" && strategy.StrategyID == strategyID {
+			tolerations = strategy.Tolerations
+			break
+		} else if strategyID == "" && strategy.Default {
+			tolerations = strategy.Tolerations
+			break
+		}
+	}
+
+	err := yaml.Unmarshal([]byte(tolerations), &ret)
 	if err != nil {
 		log.Errorf("failed to parse toleration config, err: %s", err)
 		return nil
@@ -1087,15 +1112,29 @@ func buildTolerations(clusterConfig *task.AdvancedConfig) []corev1.Toleration {
 	return ret
 }
 
-func addNodeAffinity(clusterConfig *task.AdvancedConfig) *corev1.Affinity {
-	if clusterConfig == nil || len(clusterConfig.NodeLabels) == 0 {
+func addNodeAffinity(clusterConfig *task.AdvancedConfig, strategyID string) *corev1.Affinity {
+	if clusterConfig == nil || len(clusterConfig.ScheduleStrategy) == 0 {
 		return nil
 	}
 
-	switch clusterConfig.Strategy {
+	var strategy *task.ScheduleStrategy
+	for _, s := range clusterConfig.ScheduleStrategy {
+		if strategyID != "" && s.StrategyID == strategyID {
+			strategy = s
+			break
+		} else if strategyID == "" && s.Default {
+			strategy = s
+			break
+		}
+	}
+	if strategy == nil {
+		return nil
+	}
+
+	switch strategy.Strategy {
 	case setting.RequiredSchedule:
 		nodeSelectorTerms := make([]corev1.NodeSelectorTerm, 0)
-		for _, nodeLabel := range clusterConfig.NodeLabels {
+		for _, nodeLabel := range strategy.NodeLabels {
 			var matchExpressions []corev1.NodeSelectorRequirement
 			matchExpressions = append(matchExpressions, corev1.NodeSelectorRequirement{
 				Key:      nodeLabel.Key,
@@ -1117,7 +1156,7 @@ func addNodeAffinity(clusterConfig *task.AdvancedConfig) *corev1.Affinity {
 		return affinity
 	case setting.PreferredSchedule:
 		preferredScheduleTerms := make([]corev1.PreferredSchedulingTerm, 0)
-		for _, nodeLabel := range clusterConfig.NodeLabels {
+		for _, nodeLabel := range strategy.NodeLabels {
 			var matchExpressions []corev1.NodeSelectorRequirement
 			matchExpressions = append(matchExpressions, corev1.NodeSelectorRequirement{
 				Key:      nodeLabel.Key,

@@ -26,12 +26,12 @@ import (
 
 	"github.com/mholt/archiver"
 
-	"github.com/koderover/zadig/pkg/microservice/reaper/core/service/meta"
-	"github.com/koderover/zadig/pkg/microservice/reaper/internal/s3"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/tool/log"
-	s3tool "github.com/koderover/zadig/pkg/tool/s3"
-	"github.com/koderover/zadig/pkg/util"
+	"github.com/koderover/zadig/v2/pkg/microservice/reaper/core/service/meta"
+	"github.com/koderover/zadig/v2/pkg/microservice/reaper/internal/s3"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	s3tool "github.com/koderover/zadig/v2/pkg/tool/s3"
+	"github.com/koderover/zadig/v2/pkg/util"
 )
 
 func getAchiver() *archiver.TarGz {
@@ -182,7 +182,7 @@ func (gcm *TarCacheManager) Unarchive(source, dest string) error {
 func (gcm *TarCacheManager) getS3Storage() (*s3.S3, error) {
 	var err error
 	var store *s3.S3
-	if store, err = s3.NewS3StorageFromEncryptedURI(gcm.StorageURI, gcm.aesKey); err != nil {
+	if store, err = s3.UnmarshalNewS3StorageFromEncrypted(gcm.StorageURI, gcm.aesKey); err != nil {
 		log.Errorf("Archive failed to create s3 storage %s", gcm.StorageURI)
 		return nil, err
 	}

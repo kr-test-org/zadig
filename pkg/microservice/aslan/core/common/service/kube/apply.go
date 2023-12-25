@@ -19,6 +19,7 @@ package kube
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/go-multierror"
@@ -26,28 +27,41 @@ import (
 	"go.uber.org/zap"
 	versionedclient "istio.io/client-go/pkg/clientset/versioned"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/version"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/helm/pkg/releaseutil"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models/template"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/repository"
-	commonutil "github.com/koderover/zadig/pkg/microservice/aslan/core/common/util"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/tool/kube/serializer"
-	"github.com/koderover/zadig/pkg/tool/kube/updater"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models/template"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/repository"
+	commonutil "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/util"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	kubeclient "github.com/koderover/zadig/v2/pkg/shared/kube/client"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/getter"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/serializer"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/updater"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
 )
 
 type SharedEnvHandler func(context.Context, *commonmodels.Product, string, client.Client, versionedclient.Interface) error
+type IstioGrayscaleEnvHandler func(context.Context, *commonmodels.Product, string, client.Client, versionedclient.Interface) error
 
 type ResourceApplyParam struct {
 	ProductInfo         *commonmodels.Product
 	ServiceName         string
+	ServiceList         []string // used for batch operations
 	CurrentResourceYaml string
 	UpdateResourceYaml  string
 
@@ -57,13 +71,15 @@ type ResourceApplyParam struct {
 	Timeout               int      // timeout for helm services
 	UpdateServiceRevision bool
 
-	Informer         informers.SharedInformerFactory
-	KubeClient       client.Client
-	IstioClient      versionedclient.Interface
-	AddZadigLabel    bool
-	InjectSecrets    bool
-	SharedEnvHandler SharedEnvHandler
-	Uninstall        bool
+	Informer                 informers.SharedInformerFactory
+	KubeClient               client.Client
+	IstioClient              versionedclient.Interface
+	AddZadigLabel            bool
+	InjectSecrets            bool
+	SharedEnvHandler         SharedEnvHandler
+	IstioGrayscaleEnvHandler IstioGrayscaleEnvHandler
+	Uninstall                bool
+	WaitForUninstall         bool
 }
 
 func DeploymentSelectorLabelExists(resourceName, namespace string, informer informers.SharedInformerFactory, log *zap.SugaredLogger) bool {
@@ -151,8 +167,16 @@ func SetFieldValueIsNotExist(obj map[string]interface{}, value interface{}, fiel
 	return obj
 }
 
+// in kubernetes 1.21+, CronJobV1BetaGVK is deprecated, so we should use CronJobGVK instead
+func GetValidGVK(gvk schema.GroupVersionKind, version *version.Info) schema.GroupVersionKind {
+	if gvk == getter.CronJobV1BetaGVK && !kubeclient.VersionLessThan121(version) {
+		return getter.CronJobGVK
+	}
+	return gvk
+}
+
 // removeResources removes resources currently deployed in k8s that are not in the new resource list
-func removeResources(currentItems, newItems []*unstructured.Unstructured, namespace string, kubeClient client.Client, log *zap.SugaredLogger) error {
+func removeResources(currentItems, newItems []*unstructured.Unstructured, namespace string, waitForDelete bool, kubeClient client.Client, clientSet *kubernetes.Clientset, version *version.Info, log *zap.SugaredLogger) error {
 	itemsMap := make(map[string]*unstructured.Unstructured)
 	errList := &multierror.Error{}
 	for _, u := range newItems {
@@ -171,16 +195,107 @@ func removeResources(currentItems, newItems []*unstructured.Unstructured, namesp
 			continue
 		}
 		if err := updater.DeleteUnstructured(item, kubeClient); err != nil {
+			item.SetGroupVersionKind(GetValidGVK(item.GroupVersionKind(), version))
 			errList = multierror.Append(errList, errors.Wrapf(err, "failed to remove old item %s/%s from %s", item.GetName(), item.GetKind(), namespace))
 			continue
 		}
-		log.Infof("succeed to remove old item %s/%s from %s", item.GetName(), item.GetKind(), namespace)
+
+		if !waitForDelete {
+			continue
+		}
+
+		labelSelector := fmt.Sprintf("app=%s", item.GetName())
+		watchOpts := metav1.ListOptions{
+			TypeMeta:      metav1.TypeMeta{},
+			LabelSelector: labelSelector,
+			FieldSelector: "",
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 1000*time.Millisecond)
+		defer cancel()
+
+		var watcher watch.Interface
+		var err error
+		switch item.GetKind() {
+		case setting.Deployment:
+			watcher, err = clientSet.AppsV1().Deployments(namespace).Watch(ctx, watchOpts)
+		case setting.Service:
+			watcher, err = clientSet.CoreV1().Services(namespace).Watch(ctx, watchOpts)
+		case setting.StatefulSet:
+			watcher, err = clientSet.AppsV1().StatefulSets(namespace).Watch(ctx, watchOpts)
+		case setting.Secret:
+			watcher, err = clientSet.CoreV1().Secrets(namespace).Watch(ctx, watchOpts)
+		case setting.ConfigMap:
+			watcher, err = clientSet.CoreV1().ConfigMaps(namespace).Watch(ctx, watchOpts)
+		case setting.Ingress:
+			watcher, err = clientSet.ExtensionsV1beta1().Ingresses(namespace).Watch(ctx, watchOpts)
+		case setting.PersistentVolumeClaim:
+			watcher, err = clientSet.CoreV1().PersistentVolumeClaims(namespace).Watch(ctx, watchOpts)
+		case setting.Pod:
+			watcher, err = clientSet.CoreV1().Pods(namespace).Watch(ctx, watchOpts)
+		case setting.ReplicaSet:
+			watcher, err = clientSet.AppsV1().ReplicaSets(namespace).Watch(ctx, watchOpts)
+		case setting.Job:
+			watcher, err = clientSet.BatchV1().Jobs(namespace).Watch(ctx, watchOpts)
+		case setting.CronJob:
+			watcher, err = clientSet.BatchV1beta1().CronJobs(namespace).Watch(ctx, watchOpts)
+		case setting.ClusterRoleBinding:
+			watcher, err = clientSet.RbacV1().ClusterRoleBindings().Watch(ctx, watchOpts)
+		case setting.ServiceAccount:
+			watcher, err = clientSet.CoreV1().ServiceAccounts(namespace).Watch(ctx, watchOpts)
+		case setting.ClusterRole:
+			watcher, err = clientSet.RbacV1().ClusterRoles().Watch(ctx, watchOpts)
+		case setting.Role:
+			watcher, err = clientSet.RbacV1().Roles(namespace).Watch(ctx, watchOpts)
+		case setting.RoleBinding:
+			watcher, err = clientSet.RbacV1().RoleBindings(namespace).Watch(ctx, watchOpts)
+		default:
+			err = fmt.Errorf("unknown kind %s to watch", item.GetKind())
+			log.Error(err)
+		}
+		if err != nil {
+			log.Errorf("failed to watch %s in namespace %s, error: %v", item.GetKind(), namespace, err)
+			continue
+		}
+		defer watcher.Stop()
+
+	FOR:
+		for {
+			select {
+			case event := <-watcher.ResultChan():
+				if event.Type == watch.Deleted {
+					log.Infof("succeed to remove old item %s/%v from %s", item.GetName(), item.GroupVersionKind(), namespace)
+					break FOR
+				}
+			case <-ctx.Done():
+				log.Error("Context timeout for delete %s/%s", item.GetKind(), item.GetName())
+				break FOR
+			}
+		}
 	}
 
 	return errList.ErrorOrNil()
 }
 
-func manifestToUnstructured(manifest string) ([]*unstructured.Unstructured, error) {
+func ManifestToResource(manifest string) ([]*commonmodels.ServiceResource, error) {
+	unstructuredList, err := ManifestToUnstructured(manifest)
+	if err != nil {
+		return nil, err
+	}
+	return UnstructuredToResources(unstructuredList), nil
+}
+
+func UnstructuredToResources(unstructured []*unstructured.Unstructured) []*commonmodels.ServiceResource {
+	ret := make([]*commonmodels.ServiceResource, 0)
+	for _, res := range unstructured {
+		ret = append(ret, &commonmodels.ServiceResource{
+			GroupVersionKind: res.GroupVersionKind(),
+			Name:             res.GetName(),
+		})
+	}
+	return ret
+}
+
+func ManifestToUnstructured(manifest string) ([]*unstructured.Unstructured, error) {
 	if len(manifest) == 0 {
 		return nil, nil
 	}
@@ -198,6 +313,100 @@ func manifestToUnstructured(manifest string) ([]*unstructured.Unstructured, erro
 	return resources, errList.ErrorOrNil()
 }
 
+func CheckReleaseInstalledByOtherEnv(releaseNames sets.String, productInfo *commonmodels.Product) error {
+	sharedNSEnvList := make(map[string]*commonmodels.Product)
+	insertEnvData := func(release string, env *commonmodels.Product) {
+		sharedNSEnvList[release] = env
+	}
+	envs, err := commonrepo.NewProductColl().ListEnvByNamespace(productInfo.ClusterID, productInfo.Namespace)
+	if err != nil {
+		log.Errorf("Failed to list existed namespace from the env List, error: %s", err)
+		return err
+	}
+
+	for _, env := range envs {
+		if env.ProductName == productInfo.ProductName && env.EnvName == productInfo.EnvName {
+			continue
+		}
+		for _, svc := range env.GetSvcList() {
+			if releaseNames.Has(svc.ReleaseName) {
+				insertEnvData(svc.ReleaseName, env)
+				break
+			}
+		}
+	}
+
+	if len(sharedNSEnvList) == 0 {
+		return nil
+	}
+	usedEnvStr := make([]string, 0)
+	for releasename, env := range sharedNSEnvList {
+		usedEnvStr = append(usedEnvStr, fmt.Sprintf("%s: %s/%s", releasename, env.ProductName, env.EnvName))
+	}
+	return fmt.Errorf("release is installed by other envs: %v", strings.Join(usedEnvStr, ","))
+}
+
+func CheckResourceAppliedByOtherEnv(serviceYaml string, productInfo *commonmodels.Product, serviceName string) error {
+	unstructuredRes, err := ManifestToUnstructured(serviceYaml)
+	if err != nil {
+		return fmt.Errorf("failed to convert manifest to resource, error: %v", err)
+	}
+
+	sharedNSEnvList := make(map[string]*commonmodels.Product)
+	insertEnvData := func(resource string, env *commonmodels.Product) {
+		sharedNSEnvList[resource] = env
+	}
+
+	resSet := sets.NewString()
+	resources := UnstructuredToResources(unstructuredRes)
+
+	for _, res := range resources {
+		resSet.Insert(res.String())
+	}
+	log.Infof("checkResourceAppliedByOtherEnv %s/%s, clusterID: %s, namespace: %s, resource: %v ", productInfo.ProductName, productInfo.EnvName, productInfo.ClusterID, productInfo.Namespace, resSet.List())
+
+	envs, err := commonrepo.NewProductColl().ListEnvByNamespace(productInfo.ClusterID, productInfo.Namespace)
+	if err != nil {
+		log.Errorf("Failed to list existed namespace from the env List, error: %s", err)
+		return err
+	}
+
+	for _, env := range envs {
+		if env.Source == setting.SourceFromExternal {
+			workloadStat, _ := commonrepo.NewWorkLoadsStatColl().Find(productInfo.ClusterID, productInfo.Namespace)
+			for _, workload := range workloadStat.Workloads {
+				if resSet.Has(workload.String()) {
+					insertEnvData(workload.String(), env)
+					break
+				}
+			}
+			continue
+		}
+
+		for _, svc := range env.GetServiceMap() {
+			if env.ProductName == productInfo.ProductName && env.EnvName == productInfo.EnvName && svc.ServiceName == serviceName {
+				continue
+			}
+			for _, res := range svc.Resources {
+				if resSet.Has(res.String()) {
+					insertEnvData(res.String(), env)
+					break
+				}
+			}
+		}
+	}
+
+	if len(sharedNSEnvList) == 0 {
+		return nil
+	}
+
+	usedEnvStr := make([]string, 0)
+	for resource, env := range sharedNSEnvList {
+		usedEnvStr = append(usedEnvStr, fmt.Sprintf("%s: %s/%s", resource, env.ProductName, env.EnvName))
+	}
+	return fmt.Errorf("resource is applied by other envs: %v", strings.Join(usedEnvStr, ","))
+}
+
 // CreateOrPatchResource create or patch resources defined in UpdateResourceYaml
 // `CurrentResourceYaml` will be used to determine if some resources will be deleted
 func CreateOrPatchResource(applyParam *ResourceApplyParam, log *zap.SugaredLogger) ([]*unstructured.Unstructured, error) {
@@ -208,15 +417,26 @@ func CreateOrPatchResource(applyParam *ResourceApplyParam, log *zap.SugaredLogge
 	kubeClient := applyParam.KubeClient
 	istioClient := applyParam.IstioClient
 
-	curResources, err := manifestToUnstructured(applyParam.CurrentResourceYaml)
+	curResources, err := ManifestToUnstructured(applyParam.CurrentResourceYaml)
 	if err != nil {
 		log.Errorf("Failed to convert currently deplyed resource yaml to Unstructured, manifest is\n%s\n, error: %v", applyParam.CurrentResourceYaml, err)
 		return nil, err
 	}
 
-	resources, err := manifestToUnstructured(applyParam.UpdateResourceYaml)
+	resources, err := ManifestToUnstructured(applyParam.UpdateResourceYaml)
 	if err != nil {
 		log.Errorf("Failed to convert yaml to Unstructured, manifest is\n%s\n, error: %v", applyParam.UpdateResourceYaml, err)
+		return nil, err
+	}
+
+	clientSet, errGetClientSet := kubeclient.GetKubeClientSet(config.HubServerAddress(), productInfo.ClusterID)
+	if errGetClientSet != nil {
+		err = errors.WithMessagef(errGetClientSet, "failed to init k8s clientset")
+		return nil, err
+	}
+	versionInfo, errGetVersion := clientSet.ServerVersion()
+	if errGetVersion != nil {
+		err = errors.WithMessagef(errGetVersion, "failed to get k8s server version")
 		return nil, err
 	}
 
@@ -224,14 +444,15 @@ func CreateOrPatchResource(applyParam *ResourceApplyParam, log *zap.SugaredLogge
 		if !commonutil.ServiceDeployed(applyParam.ServiceName, productInfo.ServiceDeployStrategy) {
 			return nil, nil
 		}
-		err = removeResources(curResources, resources, namespace, applyParam.KubeClient, log)
+
+		err = removeResources(curResources, resources, namespace, applyParam.WaitForUninstall, applyParam.KubeClient, clientSet, versionInfo, log)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to remove old resources")
 		}
 		return nil, nil
 	}
 
-	err = removeResources(curResources, resources, namespace, applyParam.KubeClient, log)
+	err = removeResources(curResources, resources, namespace, applyParam.WaitForUninstall, applyParam.KubeClient, clientSet, versionInfo, log)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to remove old resources")
 	}
@@ -265,16 +486,6 @@ func CreateOrPatchResource(applyParam *ResourceApplyParam, log *zap.SugaredLogge
 			u.SetNamespace(namespace)
 			u.SetLabels(MergeLabels(labels, u.GetLabels()))
 
-			if _, ok := u.GetLabels()["endpoints"]; !ok {
-				selector, _, _ := unstructured.NestedStringMap(u.Object, "spec", "selector")
-				err := unstructured.SetNestedStringMap(u.Object, MergeLabels(labels, selector), "spec", "selector")
-				if err != nil {
-					errList = multierror.Append(errList, errors.Wrapf(err, "failed to set nested string map for service: %v, err: %s", applyParam.ServiceName, err))
-					log.Errorf("failed to set nested string map: %v", err)
-					continue
-				}
-			}
-
 			err = updater.CreateOrPatchUnstructured(u, kubeClient)
 			if err != nil {
 				log.Errorf("Failed to create or update %s, manifest is\n%v\n, error: %v", u.GetKind(), u, err)
@@ -286,6 +497,14 @@ func CreateOrPatchResource(applyParam *ResourceApplyParam, log *zap.SugaredLogge
 				err = applyParam.SharedEnvHandler(context.TODO(), productInfo, u.GetName(), kubeClient, istioClient)
 				if err != nil {
 					log.Errorf("Failed to update Zadig service %s for env %s of product %s: %s", u.GetName(), productInfo.EnvName, productInfo.ProductName, err)
+					errList = multierror.Append(errList, err)
+					continue
+				}
+			}
+			if istioClient != nil && applyParam.IstioGrayscaleEnvHandler != nil {
+				err = applyParam.IstioGrayscaleEnvHandler(context.TODO(), productInfo, u.GetName(), kubeClient, istioClient)
+				if err != nil {
+					log.Errorf("Failed to update grayscale service %s for env %s of product %s: %s", u.GetName(), productInfo.EnvName, productInfo.ProductName, err)
 					errList = multierror.Append(errList, err)
 					continue
 				}
@@ -425,28 +644,54 @@ func CreateOrPatchResource(applyParam *ResourceApplyParam, log *zap.SugaredLogge
 				errList = multierror.Append(errList, errors.Wrapf(err, "failed to create or update %s/%s", u.GetKind(), u.GetName()))
 				continue
 			}
-			obj, err := serializer.NewDecoder().JSONToCronJob(jsonData)
-			if err != nil {
-				log.Errorf("Failed to convert JSON to CronJob, manifest is\n%v\n, error: %v", u, err)
-				errList = multierror.Append(errList, errors.Wrapf(err, "failed to create or update %s/%s", u.GetKind(), u.GetName()))
-				continue
-			}
+			if u.GetAPIVersion() == batchv1.SchemeGroupVersion.String() {
+				obj, err := serializer.NewDecoder().JSONToCronJob(jsonData)
+				if err != nil {
+					log.Errorf("Failed to convert JSON to CronJob, manifest is\n%v\n, error: %v", u, err)
+					errList = multierror.Append(errList, errors.Wrapf(err, "failed to create or update %s/%s", u.GetKind(), u.GetName()))
+					continue
+				}
 
-			obj.Namespace = namespace
-			obj.ObjectMeta.Labels = MergeLabels(labels, obj.ObjectMeta.Labels)
-			obj.Spec.JobTemplate.ObjectMeta.Labels = MergeLabels(labels, obj.Spec.JobTemplate.ObjectMeta.Labels)
-			obj.Spec.JobTemplate.Spec.Template.ObjectMeta.Labels = MergeLabels(labels, obj.Spec.JobTemplate.Spec.Template.ObjectMeta.Labels)
+				obj.Namespace = namespace
+				obj.ObjectMeta.Labels = MergeLabels(labels, obj.ObjectMeta.Labels)
+				obj.Spec.JobTemplate.ObjectMeta.Labels = MergeLabels(labels, obj.Spec.JobTemplate.ObjectMeta.Labels)
+				obj.Spec.JobTemplate.Spec.Template.ObjectMeta.Labels = MergeLabels(labels, obj.Spec.JobTemplate.Spec.Template.ObjectMeta.Labels)
 
-			// Inject imagePullSecrets if qn-registry-secret is not set
-			if applyParam.InjectSecrets {
-				ApplySystemImagePullSecrets(&obj.Spec.JobTemplate.Spec.Template.Spec)
-			}
+				// Inject imagePullSecrets if qn-registry-secret is not set
+				if applyParam.InjectSecrets {
+					ApplySystemImagePullSecrets(&obj.Spec.JobTemplate.Spec.Template.Spec)
+				}
 
-			err = updater.CreateOrPatchCronJob(obj, kubeClient)
-			if err != nil {
-				log.Errorf("Failed to create or update %s, manifest is\n%v\n, error: %v", u.GetKind(), obj, err)
-				errList = multierror.Append(errList, errors.Wrapf(err, "failed to create or update %s/%s", u.GetKind(), u.GetName()))
-				continue
+				err = updater.CreateOrPatchCronJob(obj, kubeClient)
+				if err != nil {
+					log.Errorf("Failed to create or update %s, manifest is\n%v\n, error: %v", u.GetKind(), obj, err)
+					errList = multierror.Append(errList, errors.Wrapf(err, "failed to create or update %s/%s", u.GetKind(), u.GetName()))
+					continue
+				}
+			} else {
+				obj, err := serializer.NewDecoder().JSONToCronJobBeta(jsonData)
+				if err != nil {
+					log.Errorf("Failed to convert JSON to CronJobBeta, manifest is\n%v\n, error: %v", u, err)
+					errList = multierror.Append(errList, errors.Wrapf(err, "failed to create or update %s/%s", u.GetKind(), u.GetName()))
+					continue
+				}
+
+				obj.Namespace = namespace
+				obj.ObjectMeta.Labels = MergeLabels(labels, obj.ObjectMeta.Labels)
+				obj.Spec.JobTemplate.ObjectMeta.Labels = MergeLabels(labels, obj.Spec.JobTemplate.ObjectMeta.Labels)
+				obj.Spec.JobTemplate.Spec.Template.ObjectMeta.Labels = MergeLabels(labels, obj.Spec.JobTemplate.Spec.Template.ObjectMeta.Labels)
+
+				// Inject imagePullSecrets if qn-registry-secret is not set
+				if applyParam.InjectSecrets {
+					ApplySystemImagePullSecrets(&obj.Spec.JobTemplate.Spec.Template.Spec)
+				}
+
+				err = updater.CreateOrPatchCronJob(obj, kubeClient)
+				if err != nil {
+					log.Errorf("Failed to create or update %s, manifest is\n%v\n, error: %v", u.GetKind(), obj, err)
+					errList = multierror.Append(errList, errors.Wrapf(err, "failed to create or update %s/%s", u.GetKind(), u.GetName()))
+					continue
+				}
 			}
 
 		case setting.ClusterRole, setting.ClusterRoleBinding:
@@ -474,16 +719,20 @@ func CreateOrPatchResource(applyParam *ResourceApplyParam, log *zap.SugaredLogge
 	}
 
 	if errList.ErrorOrNil() != nil {
-		return nil, errList.ErrorOrNil()
+		return res, errList.ErrorOrNil()
 	}
 
-	return res, errList.ErrorOrNil()
+	return res, nil
 }
 
-func prepareData(applyParam *ResourceApplyParam) (*commonmodels.RenderSet, *commonmodels.ProductService, *commonmodels.Service, error) {
+func PrepareHelmServiceData(applyParam *ResourceApplyParam) (*commonmodels.ProductService, *commonmodels.Service, error) {
 	productInfo := applyParam.ProductInfo
 	productService := applyParam.ProductInfo.GetServiceMap()[applyParam.ServiceName]
 	if productService == nil {
+		if !applyParam.UpdateServiceRevision {
+			return nil, nil, fmt.Errorf("first time online service %s needs to check the update service configuration", applyParam.ServiceName)
+		}
+
 		productService = &commonmodels.ProductService{
 			ProductName: applyParam.ProductInfo.ProductName,
 			ServiceName: applyParam.ServiceName,
@@ -507,21 +756,10 @@ func prepareData(applyParam *ResourceApplyParam) (*commonmodels.RenderSet, *comm
 
 	svcTemplate, err := repository.QueryTemplateService(svcFindOption, productInfo.Production)
 	if err != nil {
-		return nil, nil, nil, errors.Wrapf(err, "failed to find service %s/%d in product %s", applyParam.ServiceName, svcFindOption.Revision, productInfo.ProductName)
+		return nil, nil, errors.Wrapf(err, "failed to find service %s/%d in product %s", applyParam.ServiceName, svcFindOption.Revision, productInfo.ProductName)
 	}
 
-	renderSet, err := commonrepo.NewRenderSetColl().Find(&commonrepo.RenderSetFindOption{
-		ProductTmpl: productInfo.ProductName,
-		Name:        productInfo.Render.Name,
-		EnvName:     productInfo.EnvName,
-		Revision:    productInfo.Render.Revision,
-	})
-	if err != nil {
-		err = fmt.Errorf("failed to find redset name %s revision %d", productInfo.Namespace, productInfo.Render.Revision)
-		return nil, nil, nil, err
-	}
-
-	targetChart := renderSet.GetChartRenderMap()[applyParam.ServiceName]
+	targetChart := productInfo.GetChartRenderMap()[applyParam.ServiceName]
 	if targetChart == nil {
 		targetChart = &template.ServiceRender{
 			ServiceName:  applyParam.ServiceName,
@@ -529,7 +767,7 @@ func prepareData(applyParam *ResourceApplyParam) (*commonmodels.RenderSet, *comm
 			ChartVersion: svcTemplate.HelmChart.Version,
 			OverrideYaml: &template.CustomYaml{},
 		}
-		renderSet.ChartInfos = append(renderSet.ChartInfos, targetChart)
+		productService.Render = targetChart
 	}
 
 	if applyParam.UpdateServiceRevision && productService.Revision != svcTemplate.Revision {
@@ -548,9 +786,9 @@ func prepareData(applyParam *ResourceApplyParam) (*commonmodels.RenderSet, *comm
 		replaceValuesMaps := make([]map[string]interface{}, 0)
 		for _, targetContainer := range productService.Containers {
 			// prepare image replace info
-			replaceValuesMap, err := commonutil.AssignImageData(targetContainer.Image, getValidMatchData(targetContainer.ImagePath))
+			replaceValuesMap, err := commonutil.AssignImageData(targetContainer.Image, commonutil.GetValidMatchData(targetContainer.ImagePath))
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("failed to pase image uri %s/%s, err %s", productInfo.ProductName, applyParam.ServiceName, err.Error())
+				return nil, nil, fmt.Errorf("failed to pase image uri %s/%s, err %s", productInfo.ProductName, applyParam.ServiceName, err.Error())
 			}
 			replaceValuesMaps = append(replaceValuesMaps, replaceValuesMap)
 		}
@@ -558,43 +796,40 @@ func prepareData(applyParam *ResourceApplyParam) (*commonmodels.RenderSet, *comm
 		// replace image into service's values.yaml
 		replacedValuesYaml, err := commonutil.ReplaceImage(svcTemplate.HelmChart.ValuesYaml, replaceValuesMaps...)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("failed to replace image uri %s/%s, err %s", productInfo.ProductName, applyParam.ServiceName, err.Error())
+			return nil, nil, fmt.Errorf("failed to replace image uri %s/%s, err %s", productInfo.ProductName, applyParam.ServiceName, err.Error())
 
 		}
 		if replacedValuesYaml == "" {
-			return nil, nil, nil, fmt.Errorf("failed to set new image uri into service's values.yaml %s/%s", productInfo.ProductName, applyParam.ServiceName)
+			return nil, nil, fmt.Errorf("failed to set new image uri into service's values.yaml %s/%s", productInfo.ProductName, applyParam.ServiceName)
 		}
 		targetChart.ValuesYaml = replacedValuesYaml
 	}
 
 	productService.Revision = svcTemplate.Revision
 
-	return renderSet, productService, svcTemplate, nil
+	return productService, svcTemplate, nil
 }
 
-// GeneMergedValues returns content of values.yaml merged with values by zadig
-func GeneMergedValues(applyParam *ResourceApplyParam, log *zap.SugaredLogger) (string, error) {
-	renderSet, productService, _, err := prepareData(applyParam)
-	if err != nil {
-		return "", err
-	}
-	return geneMergedValues(productService, renderSet, applyParam.Images, applyParam.VariableYaml)
-}
-
-// CreateOrUpdateHelmResource create or patch helm services
+// RemoveHelmResource create or patch helm services
 // if service is not deployed ever, it will be added into target environment
 // database will also be updated
-func CreateOrUpdateHelmResource(applyParam *ResourceApplyParam, log *zap.SugaredLogger) error {
+func RemoveHelmResource(applyParam *ResourceApplyParam, log *zap.SugaredLogger) error {
 	productInfo := applyParam.ProductInfo
-
 	// uninstall release
 	if applyParam.Uninstall {
-		return DeleteHelmServiceFromEnv("workflow", "", applyParam.ProductInfo, []string{applyParam.ServiceName}, log)
+		// we need to find the product info from db again to ensure product latest
+		productInfo, err := commonrepo.NewProductColl().Find(&commonrepo.ProductFindOptions{
+			Name:    applyParam.ProductInfo.ProductName,
+			EnvName: productInfo.EnvName,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to find product: %s/%s, err: %v", applyParam.ProductInfo.ProductName, productInfo.EnvName, err)
+		}
+		targetServices := applyParam.ServiceList
+		if len(targetServices) == 0 {
+			targetServices = []string{applyParam.ServiceName}
+		}
+		return DeleteHelmReleaseFromEnv("workflow", "", productInfo, targetServices, log)
 	}
-
-	renderSet, productService, svcTemplate, err := prepareData(applyParam)
-	if err != nil {
-		return err
-	}
-	return UpgradeHelmRelease(productInfo, renderSet, productService, svcTemplate, applyParam.Images, applyParam.VariableYaml, applyParam.Timeout)
+	return nil
 }

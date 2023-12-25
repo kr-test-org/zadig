@@ -23,18 +23,17 @@ import (
 	"github.com/hashicorp/go-multierror"
 	"go.uber.org/zap"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/gerrit"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/nsq"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/webhook"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/workflowcontroller"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/tool/crypto"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	"github.com/koderover/zadig/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models/msg_queue"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/gerrit"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/webhook"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/workflowcontroller"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/tool/crypto"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
 )
 
 func DeleteWorkflowV4sByProjectName(projectName string, log *zap.SugaredLogger) error {
@@ -173,5 +172,82 @@ func DisableCronjobForWorkflowV4(workflow *commonmodels.WorkflowV4) error {
 	payload.DeleteList = disableIDList
 
 	pl, _ := json.Marshal(payload)
-	return nsq.Publish(setting.TopicCronjob, pl)
+	return mongodb.NewMsgQueueCommonColl().Create(&msg_queue.MsgQueueCommon{
+		Payload:   string(pl),
+		QueueType: setting.TopicCronjob,
+	})
+}
+
+func FillServiceModules2Jobs(args *commonmodels.WorkflowV4) (*commonmodels.WorkflowV4, bool, error) {
+	change := 0
+	for _, stage := range args.Stages {
+		for _, job := range stage.Jobs {
+			if job.Skipped || (job.ServiceModules != nil && len(job.ServiceModules) > 0) {
+				continue
+			}
+			if job.JobType == config.JobZadigBuild {
+				services := make([]*commonmodels.WorkflowServiceModule, 0)
+				build := new(commonmodels.ZadigBuildJobSpec)
+				if err := commonmodels.IToi(job.Spec, build); err != nil {
+					return nil, false, err
+				}
+				for _, serviceAndBuild := range build.ServiceAndBuilds {
+					sm := &commonmodels.WorkflowServiceModule{
+						ServiceName:   serviceAndBuild.ServiceName,
+						ServiceModule: serviceAndBuild.ServiceModule,
+					}
+					for _, repo := range serviceAndBuild.Repos {
+						sm.CodeInfo = append(sm.CodeInfo, repo)
+					}
+					services = append(services, sm)
+				}
+				if len(services) > 0 {
+					change++
+					job.ServiceModules = services
+				}
+			}
+
+			if job.JobType == config.JobZadigDeploy {
+				services := make([]*commonmodels.WorkflowServiceModule, 0)
+				deploy := new(commonmodels.ZadigDeployJobSpec)
+				if err := commonmodels.IToi(job.Spec, deploy); err != nil {
+					return nil, false, err
+				}
+				for _, serviceAndDeploy := range deploy.ServiceAndImages {
+					sm := &commonmodels.WorkflowServiceModule{
+						ServiceName:   serviceAndDeploy.ServiceName,
+						ServiceModule: serviceAndDeploy.ServiceModule,
+					}
+					services = append(services, sm)
+				}
+				if len(services) > 0 {
+					change++
+					job.ServiceModules = services
+				}
+			}
+
+			if job.JobType == config.JobZadigTesting {
+				services := make([]*commonmodels.WorkflowServiceModule, 0)
+				testing := new(commonmodels.ZadigTestingJobSpec)
+				if err := commonmodels.IToi(job.Spec, testing); err != nil {
+					return nil, false, err
+				}
+				for _, serviceAndTesting := range testing.ServiceAndTests {
+					sm := &commonmodels.WorkflowServiceModule{
+						ServiceName:   serviceAndTesting.ServiceName,
+						ServiceModule: serviceAndTesting.ServiceModule,
+					}
+					services = append(services, sm)
+				}
+				if len(services) > 0 {
+					change++
+					job.ServiceModules = services
+				}
+			}
+		}
+	}
+	if change > 0 {
+		return args, true, nil
+	}
+	return args, false, nil
 }

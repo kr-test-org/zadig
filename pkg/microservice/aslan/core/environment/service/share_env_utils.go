@@ -28,12 +28,12 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/tool/kube/util"
-	"github.com/koderover/zadig/pkg/tool/log"
-	zadiglabels "github.com/koderover/zadig/pkg/types"
-	zadigutil "github.com/koderover/zadig/pkg/util"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/util"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	zadiglabels "github.com/koderover/zadig/v2/pkg/types"
+	zadigutil "github.com/koderover/zadig/v2/pkg/util"
 )
 
 func ensureBaseEnvConfig(ctx context.Context, baseEnv *commonmodels.Product) error {
@@ -88,13 +88,23 @@ func ensureDeleteAssociatedEnvs(ctx context.Context, baseProduct *commonmodels.P
 }
 
 func ensureDeleteEnvoyFilter(ctx context.Context, baseEnv *commonmodels.Product, istioClient versionedclient.Interface) error {
-	envs, err := commonrepo.NewProductColl().List(&commonrepo.ProductListOptions{
+	shareSubEnvs, err := commonrepo.NewProductColl().List(&commonrepo.ProductListOptions{
 		ShareEnvEnable: zadigutil.GetBoolPointer(true),
 		Production:     zadigutil.GetBoolPointer(false),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to list products which enable env sharing: %s", err)
 	}
+	grayscaleGrayEnvs, err := commonrepo.NewProductColl().List(&commonrepo.ProductListOptions{
+		IstioGrayscaleEnable: zadigutil.GetBoolPointer(true),
+		Production:           zadigutil.GetBoolPointer(true),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list products which enable istio grayscale: %s", err)
+	}
+
+	envs := shareSubEnvs
+	envs = append(envs, grayscaleGrayEnvs...)
 
 	needDeleteEnvoyFilter := true
 	for _, env := range envs {
@@ -238,6 +248,22 @@ func ensureServicesInAllSubEnvs(ctx context.Context, env *commonmodels.Product, 
 	}
 
 	return nil
+}
+
+func ensureDeleteGateway(ctx context.Context, env *commonmodels.Product, gwName string, istioClient versionedclient.Interface) error {
+	_, err := istioClient.NetworkingV1alpha3().Gateways(env.Namespace).Get(ctx, gwName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		log.Warnf("Failed to find gateway %s for env %s of product %s. Don't try to delete it.", gwName, env.EnvName, env.ProductName)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	deleteOption := metav1.DeletePropagationBackground
+	return istioClient.NetworkingV1alpha3().Gateways(env.Namespace).Delete(ctx, gwName, metav1.DeleteOptions{
+		PropagationPolicy: &deleteOption,
+	})
 }
 
 func ensureDeleteVirtualService(ctx context.Context, env *commonmodels.Product, vsName string, istioClient versionedclient.Interface) error {

@@ -41,26 +41,26 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/yaml"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models/task"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models/template"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	templaterepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb/template"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/base"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/kube"
-	commonutil "github.com/koderover/zadig/pkg/microservice/aslan/core/common/util"
-	workflowservice "github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/workflow"
-	"github.com/koderover/zadig/pkg/setting"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	helmtool "github.com/koderover/zadig/pkg/tool/helmclient"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/types"
-	"github.com/koderover/zadig/pkg/util"
-	"github.com/koderover/zadig/pkg/util/converter"
-	fsutil "github.com/koderover/zadig/pkg/util/fs"
-	yamlutil "github.com/koderover/zadig/pkg/util/yaml"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models/task"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models/template"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	templaterepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb/template"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/base"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/kube"
+	commonutil "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/util"
+	workflowservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/workflow/service/workflow"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	helmtool "github.com/koderover/zadig/v2/pkg/tool/helmclient"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/util"
+	"github.com/koderover/zadig/v2/pkg/util/converter"
+	fsutil "github.com/koderover/zadig/v2/pkg/util/fs"
+	yamlutil "github.com/koderover/zadig/v2/pkg/util/yaml"
 )
 
 const (
@@ -115,7 +115,6 @@ type DeliveryChartData struct {
 	ServiceObj     *commonmodels.Service
 	ProductService *commonmodels.ProductService
 	RenderChart    *template.ServiceRender
-	RenderSet      *commonmodels.RenderSet
 	ValuesInEnv    map[string]interface{}
 }
 
@@ -563,12 +562,12 @@ func ensureChartFiles(chartData *DeliveryChartData, prod *commonmodels.Product) 
 	}
 
 	serviceName, revision := serviceObj.ServiceName, serviceObj.Revision
-	basePath := config.LocalServicePathWithRevision(serviceObj.ProductName, serviceName, revision)
-	if err := commonutil.PreloadServiceManifestsByRevision(basePath, serviceObj); err != nil {
+	basePath := config.LocalTestServicePathWithRevision(serviceObj.ProductName, serviceName, fmt.Sprint(revision))
+	if err := commonutil.PreloadServiceManifestsByRevision(basePath, serviceObj, prod.Production); err != nil {
 		log.Warnf("failed to get chart of revision: %d for service: %s, use latest version", revision, serviceName)
 		// use the latest version when it fails to download the specific version
-		basePath = config.LocalServicePath(serviceObj.ProductName, serviceName)
-		if err = commonutil.PreLoadServiceManifests(basePath, serviceObj); err != nil {
+		basePath = config.LocalTestServicePath(serviceObj.ProductName, serviceName)
+		if err = commonutil.PreLoadServiceManifests(basePath, serviceObj, prod.Production); err != nil {
 			log.Errorf("failed to load chart info for service %v", serviceObj.ServiceName)
 			return "", err
 		}
@@ -633,9 +632,10 @@ func handleImageRegistry(valuesYaml []byte, chartData *DeliveryChartData, target
 	imagePathSpecs := make([]map[string]string, 0)
 	for _, container := range serviceObj.Containers {
 		imageSearchRule := &template.ImageSearchingRule{
-			Repo:  container.ImagePath.Repo,
-			Image: container.ImagePath.Image,
-			Tag:   container.ImagePath.Tag,
+			Repo:      container.ImagePath.Repo,
+			Namespace: container.ImagePath.Namespace,
+			Image:     container.ImagePath.Image,
+			Tag:       container.ImagePath.Tag,
 		}
 		pattern := imageSearchRule.GetSearchingPattern()
 		imagePathSpecs = append(imagePathSpecs, pattern)
@@ -648,7 +648,7 @@ func handleImageRegistry(valuesYaml []byte, chartData *DeliveryChartData, target
 
 	registrySet := sets.NewString()
 	for _, spec := range imagePathSpecs {
-		imageUrl, err := commonservice.GeneImageURI(spec, flatMap)
+		imageUrl, err := commonutil.GeneImageURI(spec, flatMap)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -779,7 +779,7 @@ func handleSingleChart(chartData *DeliveryChartData, product *commonmodels.Produ
 	}
 
 	log.Infof("pushing chart %s to %s...", filepath.Base(chartPackagePath), chartRepo.URL)
-	err = client.PushChart(commonservice.GeneHelmRepo(chartRepo), chartPackagePath)
+	err = client.PushChart(commonutil.GeneHelmRepo(chartRepo), chartPackagePath)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to push chart: %s", chartPackagePath)
 	}
@@ -811,23 +811,10 @@ func CreateHelmDeliveryVersion(args *CreateHelmDeliveryVersionArgs, logger *zap.
 // validate chartInfo, make sure service is in environment
 // prepare data set for chart delivery
 func prepareChartData(chartDatas []*CreateHelmDeliveryVersionChartData, productInfo *commonmodels.Product) (map[string]*DeliveryChartData, error) {
-
-	renderSet, err := commonrepo.NewRenderSetColl().Find(&commonrepo.RenderSetFindOption{
-		Revision:    productInfo.Render.Revision,
-		Name:        productInfo.Render.Name,
-		EnvName:     productInfo.EnvName,
-		ProductTmpl: productInfo.ProductName,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to find renderSet: %s, revision: %d", productInfo.Render.Name, productInfo.Render.Revision)
-	}
-	chartMap := make(map[string]*template.ServiceRender)
-	for _, rChart := range renderSet.ChartInfos {
-		chartMap[rChart.ServiceName] = rChart
-	}
-
-	chartDataMap := make(map[string]*DeliveryChartData)
 	serviceMap := productInfo.GetServiceMap()
+	chartMap := productInfo.GetChartRenderMap()
+	chartDataMap := make(map[string]*DeliveryChartData)
+
 	for _, chartData := range chartDatas {
 		if productService, ok := serviceMap[chartData.ServiceName]; ok {
 			serviceObj, err := commonrepo.NewServiceColl().Find(&commonrepo.ServiceFindOption{
@@ -848,7 +835,6 @@ func prepareChartData(chartDatas []*CreateHelmDeliveryVersionChartData, productI
 				RenderChart:    renderChart,
 				ServiceObj:     serviceObj,
 				ProductService: productService,
-				RenderSet:      renderSet,
 			}
 		} else {
 			return nil, fmt.Errorf("service %s not found in environment", chartData.ServiceName)
@@ -1445,7 +1431,7 @@ func downloadChart(deliveryVersion *commonmodels.DeliveryVersion, chartInfo *com
 	}
 
 	chartRef := fmt.Sprintf("%s/%s", chartRepo.RepoName, chartInfo.ChartName)
-	return chartTGZFilePath, hClient.DownloadChart(commonservice.GeneHelmRepo(chartRepo), chartRef, chartInfo.ChartVersion, chartTGZFileParent, false)
+	return chartTGZFilePath, hClient.DownloadChart(commonutil.GeneHelmRepo(chartRepo), chartRef, chartInfo.ChartVersion, chartTGZFileParent, false)
 }
 
 func getChartDistributeInfo(releaseID, chartName string, log *zap.SugaredLogger) (*commonmodels.DeliveryDistribute, error) {
@@ -1509,7 +1495,7 @@ func getIndexInfoFromChartRepo(chartRepoName string) (*repo.IndexFile, error) {
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to create chart repo client")
 	}
-	return hClient.FetchIndexYaml(commonservice.GeneHelmRepo(chartRepo))
+	return hClient.FetchIndexYaml(commonutil.GeneHelmRepo(chartRepo))
 }
 
 func fillChartUrl(charts []*DeliveryVersionPayloadChart, chartRepoName string) error {

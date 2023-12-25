@@ -25,13 +25,13 @@ import (
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	crClient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/setting"
-	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
-	"github.com/koderover/zadig/pkg/tool/kube/getter"
-	"github.com/koderover/zadig/pkg/tool/kube/updater"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	kubeclient "github.com/koderover/zadig/v2/pkg/shared/kube/client"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/getter"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/updater"
 )
 
 type IstioRollbackJobCtl struct {
@@ -74,13 +74,13 @@ func (c *IstioRollbackJobCtl) Run(ctx context.Context) {
 	// NOTE that the only supported version is v1alpha3 right now
 	istioClient, err := kubeclient.GetIstioClientV1Alpha3Client(config.HubServerAddress(), c.jobTaskSpec.ClusterID)
 	if err != nil {
-		logError(c.job, fmt.Sprintf("failed to prepare istio client to do the resource update"), c.logger)
+		logError(c.job, "failed to prepare istio client to do the resource update", c.logger)
 		return
 	}
 
 	cli, err := kubeclient.GetKubeClientSet(config.HubServerAddress(), c.jobTaskSpec.ClusterID)
 	if err != nil {
-		logError(c.job, fmt.Sprintf("failed to prepare istio client to do the resource update"), c.logger)
+		logError(c.job, "failed to prepare istio client to do the resource update", c.logger)
 		return
 	}
 
@@ -179,7 +179,7 @@ func (c *IstioRollbackJobCtl) Run(ctx context.Context) {
 			}
 		} else {
 			// something wrong about this deployment, we will stop here
-			logError(c.job, fmt.Sprintf("failed to find last applied replicas when the last applied image is found"), c.logger)
+			logError(c.job, "failed to find last applied replicas when the last applied image is found", c.logger)
 			return
 		}
 	}

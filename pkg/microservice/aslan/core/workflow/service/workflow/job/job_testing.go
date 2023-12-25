@@ -18,21 +18,22 @@ package job
 
 import (
 	"fmt"
+	"net/url"
 	"path"
 	"strings"
 
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/util/rand"
 
-	configbase "github.com/koderover/zadig/pkg/config"
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/types"
-	"github.com/koderover/zadig/pkg/types/step"
+	configbase "github.com/koderover/zadig/v2/pkg/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/types/step"
 )
 
 type TestingJob struct {
@@ -267,7 +268,7 @@ func (j *TestingJob) getOriginReferedJobTargets(jobName string) ([]*commonmodels
 				if err := commonmodels.IToi(job.Spec, distributeSpec); err != nil {
 					return servicetargets, err
 				}
-				for _, distribute := range distributeSpec.Tatgets {
+				for _, distribute := range distributeSpec.Targets {
 					servicetargets = append(servicetargets, &commonmodels.ServiceTestTarget{
 						ServiceName:   distribute.ServiceName,
 						ServiceModule: distribute.ServiceModule,
@@ -339,6 +340,7 @@ func (j *TestingJob) toJobtask(testing *commonmodels.TestModule, defaultS3 *comm
 		ResReqSpec:          testingInfo.PreTest.ResReqSpec,
 		CustomEnvs:          renderKeyVals(testing.KeyVals, testingInfo.PreTest.Envs),
 		ClusterID:           testingInfo.PreTest.ClusterID,
+		StrategyID:          testingInfo.PreTest.StrategyID,
 		BuildOS:             basicImage.Value,
 		ImageFrom:           testingInfo.PreTest.ImageFrom,
 		Registries:          registries,
@@ -357,7 +359,7 @@ func (j *TestingJob) toJobtask(testing *commonmodels.TestModule, defaultS3 *comm
 		jobTaskSpec.Properties.CacheDirType = testingInfo.CacheDirType
 		jobTaskSpec.Properties.CacheUserDir = testingInfo.CacheUserDir
 	}
-	jobTaskSpec.Properties.Envs = append(jobTaskSpec.Properties.CustomEnvs, getTestingJobVariables(testing.Repos, taskID, j.workflow.Project, j.workflow.Name, testing.ProjectName, testing.Name, testType, serviceName, serviceModule, logger)...)
+	jobTaskSpec.Properties.Envs = append(jobTaskSpec.Properties.CustomEnvs, getTestingJobVariables(testing.Repos, taskID, j.workflow.Project, j.workflow.Name, j.workflow.DisplayName, testing.ProjectName, testing.Name, testType, serviceName, serviceModule, "", logger)...)
 
 	if jobTaskSpec.Properties.CacheEnable && jobTaskSpec.Properties.Cache.MediumType == types.NFSMedium {
 		jobTaskSpec.Properties.CacheUserDir = renderEnv(jobTaskSpec.Properties.CacheUserDir, jobTaskSpec.Properties.Envs)
@@ -459,11 +461,17 @@ func (j *TestingJob) toJobtask(testing *commonmodels.TestModule, defaultS3 *comm
 			StepType:  config.StepJunitReport,
 			Onfailure: true,
 			Spec: &step.StepJunitReportSpec{
-				ReportDir: testingInfo.TestResultPath,
-				S3DestDir: path.Join(j.workflow.Name, fmt.Sprint(taskID), jobTask.Name, "junit"),
-				TestName:  testing.Name,
-				DestDir:   "/tmp",
-				FileName:  "merged.xml",
+				SourceWorkflow: j.workflow.Name,
+				SourceJobKey:   j.job.Name,
+				TaskID:         taskID,
+				ReportDir:      testingInfo.TestResultPath,
+				S3DestDir:      path.Join(j.workflow.Name, fmt.Sprint(taskID), jobTask.Name, "junit"),
+				TestName:       testing.Name,
+				TestProject:    testing.ProjectName,
+				DestDir:        "/tmp",
+				FileName:       "merged.xml",
+				ServiceName:    serviceName,
+				ServiceModule:  serviceModule,
 			},
 		}
 		jobTaskSpec.Steps = append(jobTaskSpec.Steps, junitStep)
@@ -537,21 +545,20 @@ func (j *TestingJob) GetOutPuts(log *zap.SugaredLogger) []string {
 	return resp
 }
 
-func getTestingJobVariables(repos []*types.Repository, taskID int64, project, workflowName, testingProject, testingName, testType, serviceName, serviceModule string, log *zap.SugaredLogger) []*commonmodels.KeyVal {
+func getTestingJobVariables(repos []*types.Repository, taskID int64, project, workflowName, workflowDisplayName, testingProject, testingName, testType, serviceName, serviceModule, infrastructure string, log *zap.SugaredLogger) []*commonmodels.KeyVal {
 	ret := make([]*commonmodels.KeyVal, 0)
+	// basic envs
+	ret = append(ret, PrepareDefaultWorkflowTaskEnvs(project, workflowName, workflowDisplayName, infrastructure, taskID)...)
+	// repo envs
 	ret = append(ret, getReposVariables(repos)...)
 
-	ret = append(ret, &commonmodels.KeyVal{Key: "TASK_ID", Value: fmt.Sprintf("%d", taskID), IsCredential: false})
-	ret = append(ret, &commonmodels.KeyVal{Key: "PROJECT", Value: project, IsCredential: false})
 	ret = append(ret, &commonmodels.KeyVal{Key: "TESTING_PROJECT", Value: testingProject, IsCredential: false})
 	ret = append(ret, &commonmodels.KeyVal{Key: "TESTING_NAME", Value: testingName, IsCredential: false})
 	ret = append(ret, &commonmodels.KeyVal{Key: "TESTING_TYPE", Value: testType, IsCredential: false})
 	ret = append(ret, &commonmodels.KeyVal{Key: "SERVICE", Value: serviceName, IsCredential: false})
+	ret = append(ret, &commonmodels.KeyVal{Key: "SERVICE_NAME", Value: serviceName, IsCredential: false})
 	ret = append(ret, &commonmodels.KeyVal{Key: "SERVICE_MODULE", Value: serviceModule, IsCredential: false})
-	ret = append(ret, &commonmodels.KeyVal{Key: "WORKFLOW", Value: workflowName, IsCredential: false})
-	ret = append(ret, &commonmodels.KeyVal{Key: "CI", Value: "true", IsCredential: false})
-	ret = append(ret, &commonmodels.KeyVal{Key: "ZADIG", Value: "true", IsCredential: false})
-	buildURL := fmt.Sprintf("%s/v1/projects/detail/%s/pipelines/custom/%s/%d", configbase.SystemAddress(), project, workflowName, taskID)
+	buildURL := fmt.Sprintf("%s/v1/projects/detail/%s/pipelines/custom/%s/%d?display_name=%s", configbase.SystemAddress(), project, workflowName, taskID, url.QueryEscape(workflowDisplayName))
 	ret = append(ret, &commonmodels.KeyVal{Key: "BUILD_URL", Value: buildURL, IsCredential: false})
 	return ret
 }

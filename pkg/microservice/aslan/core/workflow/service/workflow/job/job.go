@@ -22,24 +22,24 @@ import (
 	"fmt"
 	"path"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/types"
-	"github.com/koderover/zadig/pkg/types/job"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/types/job"
 )
 
 const (
-	OutputNameRegexString = "^[a-zA-Z0-9_]{1,64}$"
-	JobNameKey            = "job_name"
+	VMOutputNameRegexString = "^[a-zA-Z0-9_]{1,64}$"
+	OutputNameRegexString   = "^[a-zA-Z0-9_]{1,64}$"
+	JobNameKey              = "job_name"
 )
 
 var (
@@ -61,6 +61,8 @@ func InitJobCtl(job *commonmodels.Job, workflow *commonmodels.WorkflowV4) (JobCt
 		resp = &BuildJob{job: job, workflow: workflow}
 	case config.JobZadigDeploy:
 		resp = &DeployJob{job: job, workflow: workflow}
+	case config.JobZadigHelmChartDeploy:
+		resp = &HelmChartDeployJob{job: job, workflow: workflow}
 	case config.JobPlugin:
 		resp = &PluginJob{job: job, workflow: workflow}
 	case config.JobFreestyle:
@@ -68,9 +70,9 @@ func InitJobCtl(job *commonmodels.Job, workflow *commonmodels.WorkflowV4) (JobCt
 	case config.JobCustomDeploy:
 		resp = &CustomDeployJob{job: job, workflow: workflow}
 	case config.JobK8sBlueGreenDeploy:
-		resp = &BlueGreenDeployJob{job: job, workflow: workflow}
+		resp = &BlueGreenDeployV2Job{job: job, workflow: workflow}
 	case config.JobK8sBlueGreenRelease:
-		resp = &BlueGreenReleaseJob{job: job, workflow: workflow}
+		resp = &BlueGreenReleaseV2Job{job: job, workflow: workflow}
 	case config.JobK8sCanaryDeploy:
 		resp = &CanaryDeployJob{job: job, workflow: workflow}
 	case config.JobK8sCanaryRelease:
@@ -103,6 +105,18 @@ func InitJobCtl(job *commonmodels.Job, workflow *commonmodels.WorkflowV4) (JobCt
 		resp = &WorkflowTriggerJob{job: job, workflow: workflow}
 	case config.JobOfflineService:
 		resp = &OfflineServiceJob{job: job, workflow: workflow}
+	case config.JobMseGrayRelease:
+		resp = &MseGrayReleaseJob{job: job, workflow: workflow}
+	case config.JobMseGrayOffline:
+		resp = &MseGrayOfflineJob{job: job, workflow: workflow}
+	case config.JobGuanceyunCheck:
+		resp = &GuanceyunCheckJob{job: job, workflow: workflow}
+	case config.JobGrafana:
+		resp = &GrafanaJob{job: job, workflow: workflow}
+	case config.JobJenkins:
+		resp = &JenkinsJob{job: job, workflow: workflow}
+	case config.JobSQL:
+		resp = &SQLJob{job: job, workflow: workflow}
 	default:
 		return resp, fmt.Errorf("job type not found %s", job.JobType)
 	}
@@ -206,28 +220,27 @@ func GetWorkflowOutputs(workflow *commonmodels.WorkflowV4, currentJobName string
 			if jobRankMap[job.Name] >= jobRankMap[currentJobName] {
 				return resp
 			}
-			if job.JobType == config.JobZadigBuild {
+			switch job.JobType {
+			case config.JobZadigBuild:
 				jobCtl := &BuildJob{job: job, workflow: workflow}
 				resp = append(resp, jobCtl.GetOutPuts(log)...)
-			}
-			if job.JobType == config.JobFreestyle {
+			case config.JobFreestyle:
 				jobCtl := &FreeStyleJob{job: job, workflow: workflow}
 				resp = append(resp, jobCtl.GetOutPuts(log)...)
-			}
-			if job.JobType == config.JobZadigTesting {
+			case config.JobZadigTesting:
 				jobCtl := &TestingJob{job: job, workflow: workflow}
 				resp = append(resp, jobCtl.GetOutPuts(log)...)
-			}
-			if job.JobType == config.JobZadigScanning {
+			case config.JobZadigScanning:
 				jobCtl := &ScanningJob{job: job, workflow: workflow}
 				resp = append(resp, jobCtl.GetOutPuts(log)...)
-			}
-			if job.JobType == config.JobZadigDistributeImage {
+			case config.JobZadigDistributeImage:
 				jobCtl := &ImageDistributeJob{job: job, workflow: workflow}
 				resp = append(resp, jobCtl.GetOutPuts(log)...)
-			}
-			if job.JobType == config.JobPlugin {
+			case config.JobPlugin:
 				jobCtl := &PluginJob{job: job, workflow: workflow}
+				resp = append(resp, jobCtl.GetOutPuts(log)...)
+			case config.JobZadigDeploy:
+				jobCtl := &DeployJob{job: job, workflow: workflow}
 				resp = append(resp, jobCtl.GetOutPuts(log)...)
 			}
 		}
@@ -386,47 +399,6 @@ func jobNameFormat(jobName string) string {
 	return jobName
 }
 
-func getReposVariables(repos []*types.Repository) []*commonmodels.KeyVal {
-	ret := make([]*commonmodels.KeyVal, 0)
-	for index, repo := range repos {
-
-		repoNameIndex := fmt.Sprintf("REPONAME_%d", index)
-		ret = append(ret, &commonmodels.KeyVal{Key: fmt.Sprintf(repoNameIndex), Value: repo.RepoName, IsCredential: false})
-
-		repoName := strings.Replace(repo.RepoName, "-", "_", -1)
-		repoName = strings.Replace(repoName, ".", "_", -1)
-
-		repoIndex := fmt.Sprintf("REPO_%d", index)
-		ret = append(ret, &commonmodels.KeyVal{Key: fmt.Sprintf(repoIndex), Value: repoName, IsCredential: false})
-
-		if len(repo.Branch) > 0 {
-			ret = append(ret, &commonmodels.KeyVal{Key: fmt.Sprintf("%s_BRANCH", repoName), Value: repo.Branch, IsCredential: false})
-		}
-
-		if len(repo.Tag) > 0 {
-			ret = append(ret, &commonmodels.KeyVal{Key: fmt.Sprintf("%s_TAG", repoName), Value: repo.Tag, IsCredential: false})
-		}
-
-		if repo.PR > 0 {
-			ret = append(ret, &commonmodels.KeyVal{Key: fmt.Sprintf("%s_PR", repoName), Value: strconv.Itoa(repo.PR), IsCredential: false})
-		}
-
-		if len(repo.PRs) > 0 {
-			prStrs := []string{}
-			for _, pr := range repo.PRs {
-				prStrs = append(prStrs, strconv.Itoa(pr))
-			}
-			ret = append(ret, &commonmodels.KeyVal{Key: fmt.Sprintf("%s_PR", repoName), Value: strings.Join(prStrs, ","), IsCredential: false})
-		}
-
-		if len(repo.CommitID) > 0 {
-			ret = append(ret, &commonmodels.KeyVal{Key: fmt.Sprintf("%s_COMMIT_ID", repoName), Value: repo.CommitID, IsCredential: false})
-		}
-		ret = append(ret, getEnvFromCommitMsg(repo.CommitMessage)...)
-	}
-	return ret
-}
-
 // before workflowflow task was created, we need to remove the fixed mark from variables.
 func RemoveFixedValueMarks(workflow *commonmodels.WorkflowV4) error {
 	bf := bytes.NewBuffer([]byte{})
@@ -437,14 +409,27 @@ func RemoveFixedValueMarks(workflow *commonmodels.WorkflowV4) error {
 	return json.Unmarshal([]byte(replacedString), &workflow)
 }
 
-func RenderGlobalVariables(workflow *commonmodels.WorkflowV4, taskID int64, creator string) error {
+func RenderGlobalVariables(workflow *commonmodels.WorkflowV4, taskID int64, creator, account string) error {
 	b, err := json.Marshal(workflow)
 	if err != nil {
 		return fmt.Errorf("marshal workflow error: %v", err)
 	}
-	params, err := getWorkflowDefaultParams(workflow, taskID, creator)
+	params, err := getWorkflowDefaultParams(workflow, taskID, creator, account)
 	if err != nil {
 		return fmt.Errorf("get workflow default params error: %v", err)
+	}
+	replacedString := renderMultiLineString(string(b), setting.RenderValueTemplate, params)
+	return json.Unmarshal([]byte(replacedString), &workflow)
+}
+
+func RenderStageVariables(workflow *commonmodels.WorkflowV4, taskID int64, creator string) error {
+	b, err := json.Marshal(workflow)
+	if err != nil {
+		return fmt.Errorf("marshal workflow error: %v", err)
+	}
+	params, err := getWorkflowStageParams(workflow, taskID, creator)
+	if err != nil {
+		return fmt.Errorf("get workflow stage params error: %v", err)
 	}
 	replacedString := renderMultiLineString(string(b), setting.RenderValueTemplate, params)
 	return json.Unmarshal([]byte(replacedString), &workflow)
@@ -465,13 +450,23 @@ func renderMultiLineString(value, template string, inputs []*commonmodels.Param)
 	return value
 }
 
-func getWorkflowDefaultParams(workflow *commonmodels.WorkflowV4, taskID int64, creator string) ([]*commonmodels.Param, error) {
+func getWorkflowDefaultParams(workflow *commonmodels.WorkflowV4, taskID int64, creator, account string) ([]*commonmodels.Param, error) {
 	resp := []*commonmodels.Param{}
 	resp = append(resp, &commonmodels.Param{Name: "project", Value: workflow.Project, ParamsType: "string", IsCredential: false})
 	resp = append(resp, &commonmodels.Param{Name: "workflow.name", Value: workflow.Name, ParamsType: "string", IsCredential: false})
 	resp = append(resp, &commonmodels.Param{Name: "workflow.task.id", Value: fmt.Sprintf("%d", taskID), ParamsType: "string", IsCredential: false})
 	resp = append(resp, &commonmodels.Param{Name: "workflow.task.creator", Value: creator, ParamsType: "string", IsCredential: false})
+	resp = append(resp, &commonmodels.Param{Name: "workflow.task.creator.id", Value: account, ParamsType: "string", IsCredential: false})
 	resp = append(resp, &commonmodels.Param{Name: "workflow.task.timestamp", Value: fmt.Sprintf("%d", time.Now().Unix()), ParamsType: "string", IsCredential: false})
+	for _, param := range workflow.Params {
+		paramsKey := strings.Join([]string{"workflow", "params", param.Name}, ".")
+		resp = append(resp, &commonmodels.Param{Name: paramsKey, Value: param.Value, ParamsType: "string", IsCredential: false})
+	}
+	return resp, nil
+}
+
+func getWorkflowStageParams(workflow *commonmodels.WorkflowV4, taskID int64, creator string) ([]*commonmodels.Param, error) {
+	resp := []*commonmodels.Param{}
 	for _, stage := range workflow.Stages {
 		for _, job := range stage.Jobs {
 			switch job.JobType {
@@ -480,15 +475,21 @@ func getWorkflowDefaultParams(workflow *commonmodels.WorkflowV4, taskID int64, c
 				if err := commonmodels.IToi(job.Spec, build); err != nil {
 					return nil, errors.Wrap(err, "Itoi")
 				}
-				var serviceAndModuleName, branchList []string
+				var serviceAndModuleName, branchList, gitURLs []string
 				for _, serviceAndBuild := range build.ServiceAndBuilds {
 					serviceAndModuleName = append(serviceAndModuleName, serviceAndBuild.ServiceModule+"/"+serviceAndBuild.ServiceName)
-					branch, commitID := "", ""
+					branch, commitID, gitURL := "", "", ""
 					if len(serviceAndBuild.Repos) > 0 {
 						branch = serviceAndBuild.Repos[0].Branch
 						commitID = serviceAndBuild.Repos[0].CommitID
+						if serviceAndBuild.Repos[0].AuthType == types.SSHAuthType {
+							gitURL = fmt.Sprintf("%s:%s/%s", serviceAndBuild.Repos[0].Address, serviceAndBuild.Repos[0].RepoOwner, serviceAndBuild.Repos[0].RepoName)
+						} else {
+							gitURL = fmt.Sprintf("%s/%s/%s", serviceAndBuild.Repos[0].Address, serviceAndBuild.Repos[0].RepoOwner, serviceAndBuild.Repos[0].RepoName)
+						}
 					}
 					branchList = append(branchList, branch)
+					gitURLs = append(gitURLs, gitURL)
 					resp = append(resp, &commonmodels.Param{Name: fmt.Sprintf("job.%s.%s.%s.BRANCH",
 						job.Name, serviceAndBuild.ServiceName, serviceAndBuild.ServiceModule),
 						Value: branch, ParamsType: "string", IsCredential: false})
@@ -498,6 +499,7 @@ func getWorkflowDefaultParams(workflow *commonmodels.WorkflowV4, taskID int64, c
 				}
 				resp = append(resp, &commonmodels.Param{Name: fmt.Sprintf("job.%s.SERVICES", job.Name), Value: strings.Join(serviceAndModuleName, ","), ParamsType: "string", IsCredential: false})
 				resp = append(resp, &commonmodels.Param{Name: fmt.Sprintf("job.%s.BRANCHES", job.Name), Value: strings.Join(branchList, ","), ParamsType: "string", IsCredential: false})
+				resp = append(resp, &commonmodels.Param{Name: fmt.Sprintf("job.%s.GITURLS", job.Name), Value: strings.Join(gitURLs, ","), ParamsType: "string", IsCredential: false})
 			case config.JobZadigDeploy:
 				deploy := new(commonmodels.ZadigDeployJobSpec)
 				if err := commonmodels.IToi(job.Spec, deploy); err != nil {
@@ -506,10 +508,6 @@ func getWorkflowDefaultParams(workflow *commonmodels.WorkflowV4, taskID int64, c
 				resp = append(resp, &commonmodels.Param{Name: fmt.Sprintf("job.%s.envName", job.Name), Value: deploy.Env, ParamsType: "string", IsCredential: false})
 			}
 		}
-	}
-	for _, param := range workflow.Params {
-		paramsKey := strings.Join([]string{"workflow", "params", param.Name}, ".")
-		resp = append(resp, &commonmodels.Param{Name: paramsKey, Value: param.Value, ParamsType: "string", IsCredential: false})
 	}
 	return resp, nil
 }

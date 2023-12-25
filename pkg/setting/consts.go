@@ -24,17 +24,20 @@ const LocalConfig = "local.env"
 const (
 	// common
 	ENVSystemAddress           = "ADDRESS"
-	ENVEnterprise              = "ENTERPRISE"
 	ENVMode                    = "MODE"
-	ENVNsqLookupAddrs          = "NSQLOOKUP_ADDRS"
 	ENVMongoDBConnectionString = "MONGODB_CONNECTION_STRING"
 	ENVAslanDBName             = "ASLAN_DB"
 	ENVHubAgentImage           = "HUB_AGENT_IMAGE"
-	ENVResourceServerImage     = "RESOURCE_SERVER_IMAGE"
+	ENVExecutorImage           = "EXECUTOR_IMAGE"
 	ENVMysqlUser               = "MYSQL_USER"
 	ENVMysqlPassword           = "MYSQL_PASSWORD"
 	ENVMysqlHost               = "MYSQL_HOST"
 	ENVMysqlUserDb             = "MYSQL_USER_DB"
+	ENVRedisHost               = "REDIS_HOST"
+	ENVRedisPort               = "REDIS_PORT"
+	ENVRedisUserName           = "REDIS_USERNAME"
+	ENVRedisPassword           = "REDIS_PASSWORD"
+	ENVRedisUserTokenDB        = "REDIS_USER_TOKEN_DB"
 
 	// Aslan
 	ENVPodName              = "BE_POD_NAME"
@@ -84,9 +87,11 @@ const (
 	Token                 = "X-API-Tunnel-Token"
 	Params                = "X-API-Tunnel-Params"
 	AslanBaseAddr         = "ASLAN_BASE_ADDR"
+	ScheduleWorkflow      = "SCHEDULE_WORKFLOW"
 
 	// warpdrive
 	WarpDrivePodName    = "WD_POD_NAME"
+	WarpDriveNamespace  = "BE_POD_NAMESPACE"
 	ReleaseImageTimeout = "RELEASE_IMAGE_TIMEOUT"
 
 	// reaper
@@ -110,24 +115,22 @@ const (
 	TestMode    = "test"
 
 	// user
-	ENVIssuerURL      = "ISSUER_URL"
-	ENVClientID       = "CLIENT_ID"
-	ENVClientSecret   = "CLIENT_SECRET"
-	ENVRedirectURI    = "REDIRECT_URI"
-	ENVSecretKey      = "SECRET_KEY"
-	ENVMysqlUserDB    = "MYSQL_USER_DB"
-	ENVScopes         = "SCOPES"
-	ENVTokenExpiresAt = "TOKEN_EXPIRES_AT"
-	ENVUserPort       = "USER_PORT"
+	ENVIssuerURL       = "ISSUER_URL"
+	ENVClientID        = "CLIENT_ID"
+	ENVClientSecret    = "CLIENT_SECRET"
+	ENVRedirectURI     = "REDIRECT_URI"
+	ENVSecretKey       = "SECRET_KEY"
+	ENVMysqlUserDB     = "MYSQL_USER_DB"
+	ENVScopes          = "SCOPES"
+	ENVTokenExpiresAt  = "TOKEN_EXPIRES_AT"
+	ENVUserPort        = "USER_PORT"
+	ENVDecisionLogPath = "DECISION_LOG_PATH"
 
 	// config
 	ENVMysqlDexDB = "MYSQL_DEX_DB"
 	FeatureFlag   = "feature-gates"
 
-	// initconfig
-	ENVAdminEmail    = "ADMIN_EMAIL"
-	ENVAdminPassword = "ADMIN_PASSWORD"
-	PresetAccount    = "admin"
+	ENVEnableTransaction = "ENABLE_TRANSACTION"
 )
 
 // k8s concepts
@@ -183,18 +186,21 @@ const (
 	LabelValueTrue = "true"
 
 	// Pod status
-	PodRunning    = "Running"
-	PodError      = "Error"
-	PodUnstable   = "Unstable"
-	PodCreating   = "Creating"
-	PodCreated    = "created"
-	PodUpdating   = "Updating"
-	PodDeleting   = "Deleting"
-	PodSucceeded  = "Succeeded"
-	PodFailed     = "Failed"
-	PodPending    = "Pending"
-	PodNonStarted = "Unstart"
-	PodCompleted  = "Completed"
+	PodRunning                 = "Running"
+	PodError                   = "Error"
+	PodUnstable                = "Unstable"
+	PodCreating                = "Creating"
+	PodCreated                 = "created"
+	PodUpdating                = "Updating"
+	PodDeleting                = "Deleting"
+	PodSucceeded               = "Succeeded"
+	PodFailed                  = "Failed"
+	PodPending                 = "Pending"
+	PodNonStarted              = "Unstart"
+	PodCompleted               = "Completed"
+	ServiceStatusAllSuspended  = "AllSuspend"
+	ServiceStatusPartSuspended = "PartSuspend"
+	ServiceStatusNoSuspended   = "NoSuspend"
 
 	// cluster status
 	ClusterUnknown      = "Unknown"
@@ -234,7 +240,8 @@ const (
 	// K8SDeployType Containerized Deployment
 	K8SDeployType = "k8s"
 	// helm deployment
-	HelmDeployType = "helm"
+	HelmDeployType      = "helm"
+	HelmChartDeployType = "helm_chart"
 	// PMDeployType physical machine deploy method
 	PMDeployType          = "pm"
 	TrusteeshipDeployType = "trusteeship"
@@ -252,8 +259,6 @@ const (
 	SourceFromGithub = "github"
 	// SourceFromGerrit The configuration source is gerrit
 	SourceFromGerrit = "gerrit"
-	// SourceFromCodeHub The configuration source is codehub
-	SourceFromCodeHub = "codehub"
 	// SourceFromGitee Configure the source as gitee
 	SourceFromGitee = "gitee"
 	// SourceFromGiteeEE Configure the source as gitee-enterprise
@@ -306,6 +311,8 @@ const (
 	PublishType = "publish"
 
 	FunctionTestType = "function"
+
+	AllProjects = "<all_projects>"
 )
 
 const (
@@ -363,6 +370,7 @@ const (
 	TestTaskFmt       = "TestTask:%s"
 	ServiceTaskFmt    = "ServiceTask:%s"
 	ScanningTaskFmt   = "ScanningTask:%s"
+	ReleasePlanFmt    = "ReleasePlan:default"
 )
 
 // Product Status
@@ -372,6 +380,7 @@ const (
 	ProductStatusCreating = "creating"
 	ProductStatusUpdating = "updating"
 	ProductStatusDeleting = "deleting"
+	ProductStatusSleeping = "Sleeping"
 	ProductStatusUnknown  = "unknown"
 	ProductStatusUnstable = "Unstable"
 )
@@ -432,14 +441,16 @@ const (
 	ValuesYaml = "values.yaml"
 	// TemplatesDir
 	TemplatesDir = "templates"
-	// ServiceTemplateCounterName 服务模板counter name
+	// ServiceTemplateCounterName use aslan/core/common/util.GenerateServiceNextRevision() to generate service revision
 	ServiceTemplateCounterName = "service:%s&project:%s"
-	// ServiceTemplateCounterName 服务模板counter name
+	// ProductionServiceTemplateCounterName use aslan/core/common/util.GenerateServiceNextRevision() to generate service revision
 	ProductionServiceTemplateCounterName = "productionservice:%s&project:%s"
+	EnvServiceVersionCounterName         = "project:%s&env:%s&service:%s&ishelmchart:%v"
 	// GerritDefaultOwner
 	GerritDefaultOwner = "dafault"
 	// YamlFileSeperator ...
-	YamlFileSeperator = "\n---\n"
+	YamlFileSeperator             = "\n---\n"
+	HelmChartDeployStrategySuffix = "<+helm_chart>"
 )
 
 const MaskValue = "********"
@@ -535,9 +546,11 @@ const (
 	FixedGapCronjob     = "gap"
 	CrontabCronjob      = "crontab"
 
-	WorkflowCronjob   = "workflow"
-	WorkflowV4Cronjob = "workflow_v4"
-	TestingCronjob    = "test"
+	WorkflowCronjob    = "workflow"
+	WorkflowV4Cronjob  = "workflow_v4"
+	TestingCronjob     = "test"
+	EnvAnalysisCronjob = "env_analysis"
+	EnvSleepCronjob    = "env_sleep"
 
 	TopicProcess      = "task.process"
 	TopicCancel       = "task.cancel"
@@ -565,9 +578,10 @@ const (
 // helm related
 const (
 	// components used to search image paths from yaml
-	PathSearchComponentRepo  = "repo"
-	PathSearchComponentImage = "image"
-	PathSearchComponentTag   = "tag"
+	PathSearchComponentRepo      = "repo"
+	PathSearchComponentNamespace = "namespace"
+	PathSearchComponentImage     = "image"
+	PathSearchComponentTag       = "tag"
 )
 
 // host for multiple cloud provider
@@ -696,6 +710,19 @@ const (
 	ResourceTypeCustom ResourceType = "custom"
 )
 
+type NewRoleType int64
+
+const (
+	RoleTypeSystem NewRoleType = 1
+	RoleTypeCustom NewRoleType = 2
+)
+
+const (
+	ActionTypeAdmin = iota
+	ActionTypeProject
+	ActionTypeSystem
+)
+
 // AttachedClusterNamespace is the namespace Zadig uses in attached cluster.
 // Note: **Restricted because of product design since v1.9.0**.
 const AttachedClusterNamespace = "koderover-agent"
@@ -726,13 +753,16 @@ const (
 
 // cluster dodeAffinity schedule type
 const (
-	NormalSchedule    = "normal"
-	RequiredSchedule  = "required"
-	PreferredSchedule = "preferred"
+	NormalScheduleName    = "随机调度"
+	NormalSchedule        = "normal"
+	RequiredScheduleName  = "强制调度"
+	RequiredSchedule      = "required"
+	PreferredScheduleName = "优先调度"
+	PreferredSchedule     = "preferred"
 )
 
 const (
-	JobNameRegx  = "^[a-z][a-z0-9-]{0,31}$"
+	JobNameRegx  = "^[a-z\u4e00-\u9fa5][a-z0-9\u4e00-\u9fa5-]{0,31}$"
 	WorkflowRegx = "^[a-z0-9-]+$"
 )
 
@@ -751,7 +781,7 @@ const (
 // Instant Message System types
 const (
 	IMLark     = "lark"
-	IMDingding = "dingding"
+	IMDingTalk = "dingtalk"
 )
 
 // lark app
@@ -774,3 +804,65 @@ const (
 )
 
 var ServiceVarWildCard = []string{"*"}
+
+const (
+	// AI analyze env result status
+	AIEnvAnalysisStatusSuccess = "success"
+	AIEnvAnalysisStatusFailed  = "failed"
+)
+
+const (
+	UNGROUPED = "未分组"
+)
+
+const (
+	ZadigBuild   = "zadig"
+	JenkinsBuild = "jenkins"
+)
+
+type IntegrationLevel string
+
+const (
+	IntegrationLevelSystem  IntegrationLevel = "system"
+	IntegrationLevelProject IntegrationLevel = "project"
+)
+
+const (
+	// NewVMType agent type
+	NewVMType = "agent"
+	// vm status
+	VMCreated    = "created"
+	VMRegistered = "registered"
+	VMNormal     = "normal"
+	VMAbnormal   = "abnormal"
+	VMOffline    = "offline"
+
+	// VMLabelAnyOne vm preserve label key
+	VMLabelAnyOne = "VM_LABEL_ANY_ONE"
+
+	AgentDefaultHeartbeatTimeout = 10
+
+	// vm job status
+	VMJobStatusCreated     = "created"
+	VMJobStatusDistributed = "distributed"
+	VMJobStatusRunning     = "running"
+	VMJobStatusSuccess     = "success"
+	VMJobStatusFailed      = "failed"
+
+	// vm platform type
+	LinuxAmd64 = "linux_amd64"
+	LinuxArm64 = "linux_arm64"
+	MacOSAmd64 = "darwin_amd64"
+	MacOSArm64 = "darwin_arm64"
+	WinAmd64   = "windows_amd64"
+
+	// vm cache type
+	VmCache     = "vm"
+	ObjectCache = "object"
+)
+
+const (
+	// zadig build infrastructure
+	JobK8sInfrastructure = "kubernetes"
+	JobVMInfrastructure  = "vm"
+)

@@ -26,24 +26,25 @@ import (
 	"strings"
 	"time"
 
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.uber.org/zap"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/nsq"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/s3"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/webhook"
-	commonutil "github.com/koderover/zadig/pkg/microservice/aslan/core/common/util"
-	workflowservice "github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/workflow"
-	"github.com/koderover/zadig/pkg/setting"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	s3tool "github.com/koderover/zadig/pkg/tool/s3"
-	"github.com/koderover/zadig/pkg/types"
-	"github.com/koderover/zadig/pkg/types/step"
-	"github.com/koderover/zadig/pkg/util"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models/msg_queue"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/s3"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/webhook"
+	commonutil "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/util"
+	workflowservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/workflow/service/workflow"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	s3tool "github.com/koderover/zadig/v2/pkg/tool/s3"
+	"github.com/koderover/zadig/v2/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/types/step"
+	"github.com/koderover/zadig/v2/pkg/util"
 )
 
 func CreateTesting(username string, testing *commonmodels.Testing, log *zap.SugaredLogger) error {
@@ -97,9 +98,12 @@ func HandleCronjob(testing *commonmodels.Testing, log *zap.SugaredLogger) error 
 			payload.Action = setting.TypeDisableCronjob
 		}
 		pl, _ := json.Marshal(payload)
-		err := nsq.Publish(setting.TopicCronjob, pl)
+		err := commonrepo.NewMsgQueueCommonColl().Create(&msg_queue.MsgQueueCommon{
+			Payload:   string(pl),
+			QueueType: setting.TopicCronjob,
+		})
 		if err != nil {
-			log.Errorf("Failed to publish to nsq topic: %s, the error is: %v", setting.TopicCronjob, err)
+			log.Errorf("Failed to publish cron to MsgQueueCommon, the error is: %v", err)
 			return e.ErrUpsertCronjob.AddDesc(err.Error())
 		}
 	}
@@ -154,6 +158,7 @@ type TestingOpt struct {
 	Repos       []*types.Repository        `bson:"repos"                  json:"repos"`
 	KeyVals     []*commonmodels.KeyVal     `bson:"key_vals"               json:"key_vals"`
 	ClusterID   string                     `bson:"cluster_id"             json:"cluster_id"`
+	Verbs       []string                   `bson:"-"                      json:"verbs,omitempty"`
 }
 
 func ListTestingOpt(productNames []string, testType string, log *zap.SugaredLogger) ([]*TestingOpt, error) {
@@ -271,6 +276,27 @@ func GetTesting(name, productName string, log *zap.SugaredLogger) (*commonmodels
 		resp.Schedules = &schedule
 	}
 
+	if resp.PreTest != nil && resp.PreTest.StrategyID == "" {
+		clusterID := resp.PreTest.ClusterID
+		if clusterID == "" {
+			clusterID = setting.LocalClusterID
+		}
+		cluster, err := commonrepo.NewK8SClusterColl().FindByID(clusterID)
+		if err != nil {
+			if err != mongo.ErrNoDocuments {
+				return nil, fmt.Errorf("failed to find cluster %s, error: %v", resp.PreTest.ClusterID, err)
+			}
+		} else if cluster.AdvancedConfig != nil {
+			strategies := cluster.AdvancedConfig.ScheduleStrategy
+			for _, strategy := range strategies {
+				if strategy.Default {
+					resp.PreTest.StrategyID = strategy.StrategyID
+					break
+				}
+			}
+		}
+	}
+
 	workflowservice.EnsureTestingResp(resp)
 
 	return resp, nil
@@ -315,7 +341,7 @@ func GetHTMLTestReport(pipelineName, pipelineType, taskIDStr, testName string, l
 		return "", e.ErrGetTestReport.AddErr(err)
 	}
 
-	store, err := s3.NewS3StorageFromEncryptedURI(task.StorageURI)
+	store, err := s3.UnmarshalNewS3StorageFromEncrypted(task.StorageURI)
 	if err != nil {
 		log.Errorf("parse storageURI failed, err: %s", err)
 		return "", e.ErrGetTestReport.AddErr(err)

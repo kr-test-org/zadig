@@ -17,11 +17,14 @@ limitations under the License.
 package job
 
 import (
-	"errors"
+	"fmt"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/setting"
+	"github.com/pkg/errors"
+
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/setting"
 )
 
 type JiraJob struct {
@@ -67,6 +70,13 @@ func (j *JiraJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 		return nil, errors.New("需要指定至少一个 Jira Issue")
 	}
 	j.job.Spec = j.spec
+	info, err := mongodb.NewProjectManagementColl().GetJiraByID(j.spec.JiraID)
+	if err != nil {
+		return nil, errors.Errorf("get jira info error: %v", err)
+	}
+	for _, issue := range j.spec.Issues {
+		issue.Link = fmt.Sprintf("%s/browse/%s", info.JiraHost, issue.Key)
+	}
 	jobTask := &commonmodels.JobTask{
 		Name: j.job.Name,
 		Key:  j.job.Name,
@@ -76,6 +86,7 @@ func (j *JiraJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 		JobType: string(config.JobJira),
 		Spec: &commonmodels.JobTaskJiraSpec{
 			ProjectID:    j.spec.ProjectID,
+			JiraID:       j.spec.JiraID,
 			IssueType:    j.spec.IssueType,
 			Issues:       j.spec.Issues,
 			TargetStatus: j.spec.TargetStatus,
@@ -91,8 +102,7 @@ func (j *JiraJob) LintJob() error {
 		return err
 	}
 	switch j.spec.Source {
-	case setting.VariableSourceRuntime:
-	case setting.VariableSourceOther:
+	case setting.VariableSourceRuntime, setting.VariableSourceOther:
 	default:
 		return errors.New("invalid source")
 	}

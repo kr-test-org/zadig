@@ -24,10 +24,10 @@ import (
 	"github.com/hashicorp/go-multierror"
 	"go.uber.org/zap"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/code/client"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/code/client/open"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/shared/client/systemconfig"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/code/client"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/code/client/open"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/shared/client/systemconfig"
 )
 
 type RepoInfoList struct {
@@ -101,9 +101,6 @@ func ListRepoInfos(infos []*GitRepoInfo, log *zap.SugaredLogger) ([]*GitRepoInfo
 				wg.Done()
 			}()
 			projectName := info.Repo
-			if info.Source == CodeHostCodeHub {
-				projectName = info.RepoUUID
-			}
 			info.Branches, err = codehostClient.ListBranches(client.ListOpt{
 				Namespace:   strings.Replace(info.GetNamespace(), "%2F", "/", -1),
 				ProjectName: projectName,
@@ -124,9 +121,6 @@ func ListRepoInfos(infos []*GitRepoInfo, log *zap.SugaredLogger) ([]*GitRepoInfo
 				wg.Done()
 			}()
 			projectName := info.Repo
-			if info.Source == CodeHostCodeHub {
-				projectName = info.RepoID
-			}
 
 			info.Tags, err = codehostClient.ListTags(client.ListOpt{
 				Namespace:   strings.Replace(info.GetNamespace(), "%2F", "/", -1),

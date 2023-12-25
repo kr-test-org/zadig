@@ -24,13 +24,14 @@ import (
 	"github.com/gin-contrib/sse"
 	"github.com/gin-gonic/gin"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	logservice "github.com/koderover/zadig/pkg/microservice/aslan/core/log/service"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/testing/service"
-	"github.com/koderover/zadig/pkg/setting"
-	internalhandler "github.com/koderover/zadig/pkg/shared/handler"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	"github.com/koderover/zadig/pkg/util/ginzap"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/workflowcontroller/jobcontroller"
+	logservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/log/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/workflow/testing/service"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	internalhandler "github.com/koderover/zadig/v2/pkg/shared/handler"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/util/ginzap"
 )
 
 func GetContainerLogsSSE(c *gin.Context) {
@@ -95,13 +96,15 @@ func GetWorkflowJobContainerLogsSSE(c *gin.Context) {
 		tails = int64(10)
 	}
 
+	jobName := c.Param("jobName")
+
 	internalhandler.Stream(c, func(ctx1 context.Context, streamChan chan interface{}) {
 		logservice.WorkflowTaskV4ContainerLogStream(
 			ctx1, streamChan,
 			&logservice.GetContainerOptions{
 				Namespace:    config.Namespace(),
 				PipelineName: c.Param("workflowName"),
-				SubTask:      c.Param("jobName"),
+				SubTask:      jobcontroller.GetJobContainerName(jobName),
 				TaskID:       taskID,
 				TailLines:    tails,
 			},
@@ -339,5 +342,20 @@ func GetScanningContainerLogsSSE(c *gin.Context) {
 			ctx1, streamChan,
 			options,
 			ctx.Logger)
+	}, ctx.Logger)
+}
+
+func GetJenkinsJobContainerLogsSSE(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+
+	jobID, err := strconv.ParseInt(c.Param("jobID"), 10, 64)
+	if err != nil {
+		ctx.Err = e.ErrInvalidParam.AddDesc("invalid task id")
+		internalhandler.JSONResponse(c, ctx)
+		return
+	}
+
+	internalhandler.Stream(c, func(ctx1 context.Context, streamChan chan interface{}) {
+		logservice.JenkinsJobLogStream(ctx1, c.Param("id"), c.Param("jobName"), jobID, streamChan)
 	}, ctx.Logger)
 }

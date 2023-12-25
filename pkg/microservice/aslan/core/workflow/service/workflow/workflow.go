@@ -26,18 +26,18 @@ import (
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb/template"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/collaboration"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/webhook"
-	"github.com/koderover/zadig/pkg/setting"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/types"
-	"github.com/koderover/zadig/pkg/util"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb/template"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/collaboration"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/webhook"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/util"
 )
 
 var mut sync.Mutex
@@ -92,6 +92,15 @@ type workflowCreateArg struct {
 type workflowCreateArgs struct {
 	productName string
 	argsMap     map[string]*workflowCreateArg
+}
+
+func FindWorkflowRaw(name string, logger *zap.SugaredLogger) (*commonmodels.Workflow, error) {
+	workflow, err := commonrepo.NewWorkflowColl().Find(name)
+	if err != nil {
+		logger.Errorf("Failed to find Product Workflow: %s, the error is: %v", name, err)
+		return workflow, e.ErrFindWorkflow.AddErr(err)
+	}
+	return workflow, err
 }
 
 func (args *workflowCreateArgs) addWorkflowArg(envName string, buildStageEnabled, artifactStageEnabled bool) {
@@ -299,7 +308,7 @@ func FindWorkflow(workflowName string, log *zap.SugaredLogger) (*commonmodels.Wo
 
 	services, err := commonrepo.NewServiceColl().ListMaxRevisionsByProduct(resp.ProductTmplName)
 	if err != nil {
-		log.Errorf("ServiceTmpl.ListMaxRevisions error: %v", err)
+		log.Errorf("ServiceTmpl.ListMaxRevisionsByProject error: %v", err)
 		return resp, e.ErrListTemplate.AddDesc(err.Error())
 	}
 
@@ -321,13 +330,15 @@ func FindWorkflow(workflowName string, log *zap.SugaredLogger) (*commonmodels.Wo
 
 		buildModules := []*commonmodels.BuildModule{}
 		for _, serviceTmpl := range services {
-			switch serviceTmpl.Type {
-			case setting.PMDeployType:
-				// PM service does not have such logic
-				buildModules = resp.BuildStage.Modules
-				break
 
-			case setting.K8SDeployType, setting.HelmDeployType:
+			if serviceTmpl.Type == setting.PMDeployType {
+				serviceTmpl.Containers = append(serviceTmpl.Containers, &commonmodels.Container{
+					Name: serviceTmpl.ServiceName,
+				})
+			}
+
+			switch serviceTmpl.Type {
+			case setting.K8SDeployType, setting.HelmDeployType, setting.PMDeployType:
 				for _, container := range serviceTmpl.Containers {
 					key := fmt.Sprintf("%s-%s-%s", serviceTmpl.ProductName, serviceTmpl.ServiceName, container.Name)
 					// if no target info is found for this container, meaning that this is a new service for that workflow
@@ -441,9 +452,9 @@ func PreSetWorkflow(productName string, log *zap.SugaredLogger) ([]*PreSetResp, 
 		log.Errorf("[%s] ProductTmpl.Find error: %v", productName, err)
 		return resp, e.ErrGetTemplate.AddDesc(err.Error())
 	}
-	services, err := commonrepo.NewServiceColl().ListMaxRevisionsForServices(productTmpl.AllServiceInfos(), "")
+	services, err := commonrepo.NewServiceColl().ListMaxRevisionsForServices(productTmpl.AllTestServiceInfos(), "")
 	if err != nil {
-		log.Errorf("ServiceTmpl.ListMaxRevisions error: %v", err)
+		log.Errorf("ServiceTmpl.ListMaxRevisionsByProject error: %v", err)
 		return resp, e.ErrListTemplate.AddDesc(err.Error())
 	}
 

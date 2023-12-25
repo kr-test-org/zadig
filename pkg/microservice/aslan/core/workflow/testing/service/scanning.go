@@ -23,24 +23,25 @@ import (
 	"strings"
 	"time"
 
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.uber.org/zap"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models/task"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/base"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/s3"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/scmnotify"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/webhook"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/util"
-	workflowservice "github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/workflow"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/shared/client/systemconfig"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	"github.com/koderover/zadig/pkg/tool/sonar"
-	"github.com/koderover/zadig/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models/task"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/base"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/s3"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/scmnotify"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/webhook"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/util"
+	workflowservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/workflow/service/workflow"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/shared/client/systemconfig"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/tool/sonar"
+	"github.com/koderover/zadig/v2/pkg/types"
 )
 
 func CreateScanningModule(username string, args *Scanning, log *zap.SugaredLogger) error {
@@ -159,6 +160,28 @@ func GetScanningModuleByID(id string, log *zap.SugaredLogger) (*Scanning, error)
 		log.Errorf("failed to get scanning from mongodb, the error is: %s", err)
 		return nil, err
 	}
+
+	if scanning.AdvancedSetting != nil && scanning.AdvancedSetting.StrategyID == "" {
+		clusterID := scanning.AdvancedSetting.ClusterID
+		if clusterID == "" {
+			clusterID = setting.LocalClusterID
+		}
+		cluster, err := commonrepo.NewK8SClusterColl().FindByID(clusterID)
+		if err != nil {
+			if err != mongo.ErrNoDocuments {
+				return nil, fmt.Errorf("failed to find cluster %s, error: %v", scanning.AdvancedSetting.ClusterID, err)
+			}
+		} else if cluster.AdvancedConfig != nil {
+			strategies := cluster.AdvancedConfig.ScheduleStrategy
+			for _, strategy := range strategies {
+				if strategy.Default {
+					scanning.AdvancedSetting.StrategyID = strategy.StrategyID
+					break
+				}
+			}
+		}
+	}
+
 	return ConvertDBScanningModule(scanning), nil
 }
 
@@ -216,6 +239,11 @@ func CreateScanningTask(id string, req []*ScanningRepoInfo, notificationID, user
 		return 0, err
 	}
 
+	clusterInfo, err := commonrepo.NewK8SClusterColl().Get(scanningInfo.AdvancedSetting.ClusterID)
+	if err != nil {
+		return 0, e.ErrConvertSubTasks.AddErr(fmt.Errorf("failed to get cluster: %s, err: %s", scanningInfo.AdvancedSetting.ClusterID, err))
+	}
+
 	repos := make([]*types.Repository, 0)
 	for _, arg := range req {
 		rep, err := systemconfig.New().GetCodeHost(arg.CodehostID)
@@ -260,23 +288,39 @@ func CreateScanningTask(id string, req []*ScanningRepoInfo, notificationID, user
 		repos = append(repos, repoInfo)
 	}
 
+	// compatibility code
+	cacheEnabled := false
+	cacheDirType := types.WorkspaceCacheDir
+	userCacheDir := ""
+	if scanningInfo.AdvancedSetting.Cache != nil {
+		cacheEnabled = scanningInfo.AdvancedSetting.Cache.CacheEnable
+		cacheDirType = scanningInfo.AdvancedSetting.Cache.CacheDirType
+		userCacheDir = scanningInfo.AdvancedSetting.Cache.CacheUserDir
+	}
+
 	scanningTask := &task.Scanning{
-		TaskType:   config.TaskScanning,
-		Status:     config.StatusCreated,
-		ScanningID: scanningInfo.ID.Hex(),
-		Name:       scanningInfo.Name,
-		ImageInfo:  scanningImage,
-		ResReq:     scanningInfo.AdvancedSetting.ResReq,
-		ResReqSpec: scanningInfo.AdvancedSetting.ResReqSpec,
-		Registries: registries,
-		Parameter:  scanningInfo.Parameter,
-		Script:     scanningInfo.Script,
+		TaskType:      config.TaskScanning,
+		Status:        config.StatusCreated,
+		ScanningID:    scanningInfo.ID.Hex(),
+		Name:          scanningInfo.Name,
+		EnableScanner: scanningInfo.EnableScanner,
+		ImageInfo:     scanningImage,
+		ResReq:        scanningInfo.AdvancedSetting.ResReq,
+		ResReqSpec:    scanningInfo.AdvancedSetting.ResReqSpec,
+		Registries:    registries,
+		Parameter:     scanningInfo.Parameter,
+		Envs:          scanningInfo.Envs,
+		Script:        scanningInfo.Script,
 		// the timeout we save is measured in minute
 		Timeout:          scanningInfo.AdvancedSetting.Timeout * 60,
 		ClusterID:        scanningInfo.AdvancedSetting.ClusterID,
+		StrategyID:       scanningInfo.AdvancedSetting.StrategyID,
+		Cache:            clusterInfo.Cache,
+		CacheEnable:      cacheEnabled,
+		CacheDirType:     cacheDirType,
+		CacheUserDir:     userCacheDir,
 		Repos:            repos,
 		InstallItems:     scanningInfo.Installs,
-		PreScript:        scanningInfo.PreScript,
 		CheckQualityGate: scanningInfo.CheckQualityGate,
 	}
 
@@ -293,7 +337,7 @@ func CreateScanningTask(id string, req []*ScanningRepoInfo, notificationID, user
 			return 0, err
 		}
 
-		scanningTask.SonarInfo = &types.SonarInfo{
+		scanningTask.SonarInfo = &commonmodels.SonarInfo{
 			Token:         sonarInfo.Token,
 			ServerAddress: sonarInfo.ServerAddress,
 		}
@@ -326,7 +370,7 @@ func CreateScanningTask(id string, req []*ScanningRepoInfo, notificationID, user
 		return 0, e.ErrFindDefaultS3Storage.AddDesc("default storage is required by distribute task")
 	}
 
-	defaultURL, err := defaultS3.GetEncryptedURL()
+	defaultURL, err := defaultS3.GetEncrypted()
 	if err != nil {
 		log.Errorf("cannot convert the s3 config to an encrypted URI, error: %s", err)
 		return 0, e.ErrS3Storage.AddErr(err)

@@ -23,11 +23,11 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/tool/crypto"
-	mongotool "github.com/koderover/zadig/pkg/tool/mongo"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/tool/crypto"
+	mongotool "github.com/koderover/zadig/v2/pkg/tool/mongo"
 )
 
 type ClusterListOpts struct {
@@ -86,6 +86,13 @@ func (c *K8SClusterColl) Create(cluster *models.K8SCluster, id string) error {
 // Update ...
 func (c *K8SClusterColl) Update(cluster *models.K8SCluster) error {
 	_, err := c.UpdateOne(context.TODO(), bson.M{"_id": cluster.ID}, bson.M{"$set": cluster})
+	return err
+}
+
+func (c *K8SClusterColl) UpdateScheduleStrategy(cluster *models.K8SCluster) error {
+	_, err := c.UpdateOne(context.TODO(), bson.M{"_id": cluster.ID}, bson.M{"$set": bson.M{
+		"advanced_config.schedule_strategy": cluster.AdvancedConfig.ScheduleStrategy,
+	}})
 	return err
 }
 
@@ -192,6 +199,17 @@ func (c *K8SClusterColl) Find(clusterType string) ([]*models.K8SCluster, error) 
 func (c *K8SClusterColl) FindByName(name string) (*models.K8SCluster, error) {
 	res := &models.K8SCluster{}
 	err := c.FindOne(context.TODO(), bson.M{"name": name}).Decode(res)
+
+	return res, err
+}
+
+func (c *K8SClusterColl) FindByID(ID string) (*models.K8SCluster, error) {
+	clusterID, err := primitive.ObjectIDFromHex(ID)
+	if err != nil {
+		return nil, err
+	}
+	res := &models.K8SCluster{}
+	err = c.FindOne(context.TODO(), bson.M{"_id": clusterID}).Decode(res)
 
 	return res, err
 }

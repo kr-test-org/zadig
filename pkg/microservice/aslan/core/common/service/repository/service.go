@@ -17,8 +17,9 @@ limitations under the License.
 package repository
 
 import (
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 func QueryTemplateService(option *mongodb.ServiceFindOption, production bool) (*models.Service, error) {
@@ -34,6 +35,14 @@ func ListServicesWithSRevision(option *mongodb.SvcRevisionListOption, production
 		return mongodb.NewServiceColl().ListServicesWithSRevision(option)
 	} else {
 		return mongodb.NewProductionServiceColl().ListServicesWithSRevision(option)
+	}
+}
+
+func ListMaxRevisions(opt *mongodb.ServiceListOption, production bool) ([]*models.Service, error) {
+	if !production {
+		return mongodb.NewServiceColl().ListMaxRevisions(opt)
+	} else {
+		return mongodb.NewProductionServiceColl().ListMaxRevisions(opt)
 	}
 }
 
@@ -57,4 +66,44 @@ func GetMaxRevisionsServicesMap(productName string, production bool) (map[string
 	}
 
 	return svcMap, nil
+}
+
+func UpdateServiceVariables(args *models.Service, production bool) error {
+	if !production {
+		return mongodb.NewServiceColl().UpdateServiceVariables(args)
+	} else {
+		return mongodb.NewProductionServiceColl().UpdateServiceVariables(args)
+	}
+}
+
+func UpdateStatus(serviceName, productName, status string, production bool) error {
+	if !production {
+		return mongodb.NewServiceColl().UpdateStatus(serviceName, productName, status)
+	} else {
+		return mongodb.NewProductionServiceColl().UpdateStatus(serviceName, productName, status)
+	}
+}
+
+func Update(service *models.Service, production bool) error {
+	if !production {
+		return mongodb.NewServiceColl().Update(service)
+	} else {
+		return mongodb.NewProductionServiceColl().Update(service)
+	}
+}
+
+func UpdateWithSession(service *models.Service, production bool, session mongo.Session) error {
+	if !production {
+		return mongodb.NewServiceCollWithSession(session).Update(service)
+	} else {
+		return mongodb.NewProductionServiceCollWithSession(session).Update(service)
+	}
+}
+
+func Create(service *models.Service, production bool) error {
+	if !production {
+		return mongodb.NewServiceColl().Create(service)
+	} else {
+		return mongodb.NewProductionServiceColl().Create(service)
+	}
 }

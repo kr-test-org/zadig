@@ -18,28 +18,34 @@ package job
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"strings"
 
+	aslanUtil "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/util"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
 	"go.uber.org/zap"
 
-	configbase "github.com/koderover/zadig/pkg/config"
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/repository"
-	templ "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/template"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/types"
-	"github.com/koderover/zadig/pkg/types/job"
-	"github.com/koderover/zadig/pkg/types/step"
+	"github.com/koderover/zadig/v2/pkg/setting"
+
+	configbase "github.com/koderover/zadig/v2/pkg/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/repository"
+	templ "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/template"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/types/job"
+	"github.com/koderover/zadig/v2/pkg/types/step"
 )
 
 const (
-	IMAGEKEY   = "IMAGE"
-	PKGFILEKEY = "PKG_FILE"
+	IMAGEKEY    = "IMAGE"
+	IMAGETAGKEY = "imageTag"
+	PKGFILEKEY  = "PKG_FILE"
 )
 
 type BuildJob struct {
@@ -108,7 +114,6 @@ func (j *BuildJob) SetPreset() error {
 		newBuilds = append(newBuilds, build)
 	}
 	j.spec.ServiceAndBuilds = newBuilds
-	j.spec.ServiceOptions = newBuilds
 	j.job.Spec = j.spec
 	return nil
 }
@@ -151,7 +156,6 @@ func (j *BuildJob) MergeArgs(args *commonmodels.Job) error {
 		if err := commonmodels.IToi(args.Spec, argsSpec); err != nil {
 			return err
 		}
-		j.spec.DockerRegistryID = argsSpec.DockerRegistryID
 		newBuilds := []*commonmodels.ServiceAndBuild{}
 		for _, build := range j.spec.ServiceAndBuilds {
 			for _, argsBuild := range argsSpec.ServiceAndBuilds {
@@ -217,6 +221,7 @@ func (j *BuildJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 		if err != nil {
 			return resp, fmt.Errorf("find build: %s error: %v", build.BuildName, err)
 		}
+		// it only fills build detail created from template
 		if err := fillBuildDetail(buildInfo, build.ServiceName, build.ServiceModule); err != nil {
 			return resp, err
 		}
@@ -237,11 +242,13 @@ func (j *BuildJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 				"service_module": build.ServiceModule,
 				JobNameKey:       j.job.Name,
 			},
-			Key:     strings.Join([]string{j.job.Name, build.ServiceName, build.ServiceModule}, "."),
-			JobType: string(config.JobZadigBuild),
-			Spec:    jobTaskSpec,
-			Timeout: int64(buildInfo.Timeout),
-			Outputs: outputs,
+			Key:            strings.Join([]string{j.job.Name, build.ServiceName, build.ServiceModule}, "."),
+			JobType:        string(config.JobZadigBuild),
+			Spec:           jobTaskSpec,
+			Timeout:        int64(buildInfo.Timeout),
+			Outputs:        outputs,
+			Infrastructure: buildInfo.Infrastructure,
+			VMLabels:       buildInfo.VMLabels,
 		}
 		jobTaskSpec.Properties = commonmodels.JobProperties{
 			Timeout:             int64(buildInfo.Timeout),
@@ -249,34 +256,45 @@ func (j *BuildJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 			ResReqSpec:          buildInfo.PreBuild.ResReqSpec,
 			CustomEnvs:          renderKeyVals(build.KeyVals, buildInfo.PreBuild.Envs),
 			ClusterID:           buildInfo.PreBuild.ClusterID,
+			StrategyID:          buildInfo.PreBuild.StrategyID,
 			BuildOS:             basicImage.Value,
 			ImageFrom:           buildInfo.PreBuild.ImageFrom,
 			Registries:          registries,
 			ShareStorageDetails: getShareStorageDetail(j.workflow.ShareStorages, build.ShareStorageInfo, j.workflow.Name, taskID),
 		}
-		clusterInfo, err := commonrepo.NewK8SClusterColl().Get(buildInfo.PreBuild.ClusterID)
-		if err != nil {
-			return resp, fmt.Errorf("find cluster: %s error: %v", buildInfo.PreBuild.ClusterID, err)
-		}
 
-		if clusterInfo.Cache.MediumType == "" {
-			jobTaskSpec.Properties.CacheEnable = false
-		} else {
-			jobTaskSpec.Properties.Cache = clusterInfo.Cache
+		jobTaskSpec.Properties.Envs = append(jobTaskSpec.Properties.CustomEnvs, getBuildJobVariables(build, taskID, j.workflow.Project, j.workflow.Name, j.workflow.DisplayName, image, jobTask.Infrastructure, registry, logger)...)
+		jobTaskSpec.Properties.UseHostDockerDaemon = buildInfo.PreBuild.UseHostDockerDaemon
+
+		if jobTask.Infrastructure == setting.JobVMInfrastructure {
 			jobTaskSpec.Properties.CacheEnable = buildInfo.CacheEnable
 			jobTaskSpec.Properties.CacheDirType = buildInfo.CacheDirType
 			jobTaskSpec.Properties.CacheUserDir = buildInfo.CacheUserDir
-		}
-		jobTaskSpec.Properties.Envs = append(jobTaskSpec.Properties.CustomEnvs, getBuildJobVariables(build, taskID, j.workflow.Project, j.workflow.Name, image, registry, logger)...)
-		jobTaskSpec.Properties.UseHostDockerDaemon = buildInfo.PreBuild.UseHostDockerDaemon
+		} else {
+			clusterInfo, err := commonrepo.NewK8SClusterColl().Get(buildInfo.PreBuild.ClusterID)
+			if err != nil {
+				return resp, fmt.Errorf("find cluster: %s error: %v", buildInfo.PreBuild.ClusterID, err)
+			}
 
-		if jobTaskSpec.Properties.CacheEnable && jobTaskSpec.Properties.Cache.MediumType == types.NFSMedium {
-			jobTaskSpec.Properties.CacheUserDir = renderEnv(jobTaskSpec.Properties.CacheUserDir, jobTaskSpec.Properties.Envs)
-			jobTaskSpec.Properties.Cache.NFSProperties.Subpath = renderEnv(jobTaskSpec.Properties.Cache.NFSProperties.Subpath, jobTaskSpec.Properties.Envs)
+			if clusterInfo.Cache.MediumType == "" {
+				jobTaskSpec.Properties.CacheEnable = false
+			} else {
+				jobTaskSpec.Properties.Cache = clusterInfo.Cache
+				jobTaskSpec.Properties.CacheEnable = buildInfo.CacheEnable
+				jobTaskSpec.Properties.CacheDirType = buildInfo.CacheDirType
+				jobTaskSpec.Properties.CacheUserDir = buildInfo.CacheUserDir
+			}
+
+			if jobTaskSpec.Properties.CacheEnable && jobTaskSpec.Properties.Cache.MediumType == types.NFSMedium {
+				jobTaskSpec.Properties.CacheUserDir = renderEnv(jobTaskSpec.Properties.CacheUserDir, jobTaskSpec.Properties.Envs)
+				jobTaskSpec.Properties.Cache.NFSProperties.Subpath = renderEnv(jobTaskSpec.Properties.Cache.NFSProperties.Subpath, jobTaskSpec.Properties.Envs)
+			}
 		}
 
 		// for other job refer current latest image.
 		build.Image = job.GetJobOutputKey(jobTask.Key, "IMAGE")
+		log.Infof("BuildJob ToJobs %d: workflow %s service %s, module %s, image %s",
+			taskID, j.workflow.Name, build.ServiceName, build.ServiceModule, build.Image)
 
 		// init tools install step
 		tools := []*step.Tool{}
@@ -309,18 +327,31 @@ func (j *BuildJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 		}
 		jobTaskSpec.Steps = append(jobTaskSpec.Steps, debugBeforeStep)
 		// init shell step
+		scripts := []string{}
 		dockerLoginCmd := `docker login -u "$DOCKER_REGISTRY_AK" -p "$DOCKER_REGISTRY_SK" "$DOCKER_REGISTRY_HOST" &> /dev/null`
-		scripts := append([]string{dockerLoginCmd}, strings.Split(replaceWrapLine(buildInfo.Scripts), "\n")...)
-		scripts = append(scripts, outputScript(outputs)...)
-		shellStep := &commonmodels.StepTask{
-			Name:     build.ServiceName + "-shell",
-			JobName:  jobTask.Name,
-			StepType: config.StepShell,
-			Spec: &step.StepShellSpec{
-				Scripts: scripts,
-			},
+		if jobTask.Infrastructure == setting.JobVMInfrastructure {
+			scripts = append(scripts, strings.Split(replaceWrapLine(buildInfo.Scripts), "\n")...)
+		} else {
+			scripts = append([]string{dockerLoginCmd}, strings.Split(replaceWrapLine(buildInfo.Scripts), "\n")...)
+			scripts = append(scripts, outputScript(outputs)...)
 		}
-		jobTaskSpec.Steps = append(jobTaskSpec.Steps, shellStep)
+		scriptStep := &commonmodels.StepTask{
+			JobName: jobTask.Name,
+		}
+		if buildInfo.ScriptType == types.ScriptTypeShell || buildInfo.ScriptType == "" {
+			scriptStep.Name = build.ServiceName + "-shell"
+			scriptStep.StepType = config.StepShell
+			scriptStep.Spec = &step.StepShellSpec{
+				Scripts: scripts,
+			}
+		} else if buildInfo.ScriptType == types.ScriptTypeBatchFile {
+			scriptStep.Name = build.ServiceName + "-batchfile"
+			scriptStep.StepType = config.StepBatchFile
+			scriptStep.Spec = &step.StepBatchFileSpec{
+				Scripts: scripts,
+			}
+		}
+		jobTaskSpec.Steps = append(jobTaskSpec.Steps, scriptStep)
 		// init debug after step
 		debugAfterStep := &commonmodels.StepTask{
 			Name:     build.ServiceName + "-debug_after",
@@ -466,27 +497,25 @@ func replaceWrapLine(script string) string {
 	), "\r", "\n", -1)
 }
 
-func getBuildJobVariables(build *commonmodels.ServiceAndBuild, taskID int64, project, workflowName, image string, registry *commonmodels.RegistryNamespace, log *zap.SugaredLogger) []*commonmodels.KeyVal {
+func getBuildJobVariables(build *commonmodels.ServiceAndBuild, taskID int64, project, workflowName, workflowDisplayName, image, infrastructure string, registry *commonmodels.RegistryNamespace, log *zap.SugaredLogger) []*commonmodels.KeyVal {
 	ret := make([]*commonmodels.KeyVal, 0)
+	// basic envs
+	ret = append(ret, PrepareDefaultWorkflowTaskEnvs(project, workflowName, workflowDisplayName, infrastructure, taskID)...)
+
+	// repo envs
 	ret = append(ret, getReposVariables(build.Repos)...)
+	// build specific envs
 	ret = append(ret, &commonmodels.KeyVal{Key: "DOCKER_REGISTRY_HOST", Value: registry.RegAddr, IsCredential: false})
 	ret = append(ret, &commonmodels.KeyVal{Key: "DOCKER_REGISTRY_AK", Value: registry.AccessKey, IsCredential: false})
 	ret = append(ret, &commonmodels.KeyVal{Key: "DOCKER_REGISTRY_SK", Value: registry.SecretKey, IsCredential: true})
 
-	ret = append(ret, &commonmodels.KeyVal{Key: "TASK_ID", Value: fmt.Sprintf("%d", taskID), IsCredential: false})
 	ret = append(ret, &commonmodels.KeyVal{Key: "SERVICE", Value: build.ServiceName, IsCredential: false})
+	ret = append(ret, &commonmodels.KeyVal{Key: "SERVICE_NAME", Value: build.ServiceName, IsCredential: false})
 	ret = append(ret, &commonmodels.KeyVal{Key: "SERVICE_MODULE", Value: build.ServiceModule, IsCredential: false})
-	ret = append(ret, &commonmodels.KeyVal{Key: "PROJECT", Value: project, IsCredential: false})
-	ret = append(ret, &commonmodels.KeyVal{Key: "WORKFLOW", Value: workflowName, IsCredential: false})
 	ret = append(ret, &commonmodels.KeyVal{Key: "IMAGE", Value: image, IsCredential: false})
-	ret = append(ret, &commonmodels.KeyVal{Key: "CI", Value: "true", IsCredential: false})
-	ret = append(ret, &commonmodels.KeyVal{Key: "ZADIG", Value: "true", IsCredential: false})
-	buildURL := fmt.Sprintf("%s/v1/projects/detail/%s/pipelines/custom/%s/%d", configbase.SystemAddress(), project, workflowName, taskID)
+	buildURL := fmt.Sprintf("%s/v1/projects/detail/%s/pipelines/custom/%s/%d?display_name=%s", configbase.SystemAddress(), project, workflowName, taskID, url.QueryEscape(workflowDisplayName))
 	ret = append(ret, &commonmodels.KeyVal{Key: "BUILD_URL", Value: buildURL, IsCredential: false})
 	ret = append(ret, &commonmodels.KeyVal{Key: "PKG_FILE", Value: build.Package, IsCredential: false})
-	for _, repo := range build.Repos {
-		ret = append(ret, &commonmodels.KeyVal{Key: strings.ReplaceAll(repo.RepoName, "-", "_") + "_ORG", Value: strings.ReplaceAll(repo.RepoOwner, "-", "_"), IsCredential: false})
-	}
 	return ret
 }
 
@@ -521,6 +550,7 @@ func fillBuildDetail(moduleBuild *commonmodels.Build, serviceName, serviceModule
 	moduleBuild.Timeout = buildTemplate.Timeout
 	moduleBuild.PreBuild = buildTemplate.PreBuild
 	moduleBuild.JenkinsBuild = buildTemplate.JenkinsBuild
+	moduleBuild.ScriptType = buildTemplate.ScriptType
 	moduleBuild.Scripts = buildTemplate.Scripts
 	moduleBuild.PostBuild = buildTemplate.PostBuild
 	moduleBuild.SSHs = buildTemplate.SSHs
@@ -530,6 +560,8 @@ func fillBuildDetail(moduleBuild *commonmodels.Build, serviceName, serviceModule
 	moduleBuild.CacheUserDir = buildTemplate.CacheUserDir
 	moduleBuild.AdvancedSettingsModified = buildTemplate.AdvancedSettingsModified
 	moduleBuild.Outputs = buildTemplate.Outputs
+	moduleBuild.Infrastructure = buildTemplate.Infrastructure
+	moduleBuild.VMLabels = buildTemplate.VmLabels
 
 	// repos are configured by service modules
 	for _, serviceConfig := range moduleBuild.Targets {
@@ -586,6 +618,24 @@ func mergeRepos(templateRepos []*types.Repository, customRepos []*types.Reposito
 }
 
 func (j *BuildJob) LintJob() error {
+	j.spec = &commonmodels.ZadigBuildJobSpec{}
+	if err := commonmodels.IToiYaml(j.job.Spec, j.spec); err != nil {
+		return err
+	}
+
+	if err := aslanUtil.CheckZadigXLicenseStatus(); err != nil {
+		for _, item := range j.spec.ServiceAndBuilds {
+			buildInfo, err := commonrepo.NewBuildColl().Find(&commonrepo.BuildFindOption{Name: item.BuildName})
+			if err != nil {
+				log.Errorf("found build %s failed, err: %s", item.BuildName, err)
+				return e.ErrLicenseInvalid.AddDesc("校验工作流失败")
+			}
+			if buildInfo.Infrastructure == "vm" {
+				return e.ErrLicenseInvalid.AddDesc("使用主机构建是专业版功能")
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -624,6 +674,11 @@ func ensureBuildInOutputs(outputs []*commonmodels.Output) []*commonmodels.Output
 	if _, ok := keyMap[IMAGEKEY]; !ok {
 		outputs = append(outputs, &commonmodels.Output{
 			Name: IMAGEKEY,
+		})
+	}
+	if _, ok := keyMap[IMAGETAGKEY]; !ok {
+		outputs = append(outputs, &commonmodels.Output{
+			Name: IMAGETAGKEY,
 		})
 	}
 	if _, ok := keyMap[PKGFILEKEY]; !ok {

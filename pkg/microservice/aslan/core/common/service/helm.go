@@ -21,14 +21,13 @@ import (
 	"path"
 
 	"go.uber.org/zap"
-	"helm.sh/helm/v3/pkg/repo"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	fsservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/fs"
-	"github.com/koderover/zadig/pkg/tool/crypto"
-	"github.com/koderover/zadig/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	fsservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/fs"
+	"github.com/koderover/zadig/v2/pkg/tool/crypto"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
 )
 
 func ListHelmRepos(encryptedKey string, log *zap.SugaredLogger) ([]*commonmodels.HelmRepo, error) {
@@ -52,30 +51,46 @@ func ListHelmRepos(encryptedKey string, log *zap.SugaredLogger) ([]*commonmodels
 	return helmRepos, nil
 }
 
+func ListHelmReposByProject(projectName string, log *zap.SugaredLogger) ([]*commonmodels.HelmRepo, error) {
+	helmRepos, err := commonrepo.NewHelmRepoColl().ListByProject(projectName)
+	if err != nil {
+		log.Errorf("ListHelmRepos err:%v", err)
+		return []*commonmodels.HelmRepo{}, nil
+	}
+	for _, helmRepo := range helmRepos {
+		helmRepo.Password = ""
+		helmRepo.Projects = nil
+	}
+	return helmRepos, nil
+}
+
 func ListHelmReposPublic() ([]*commonmodels.HelmRepo, error) {
 	return commonrepo.NewHelmRepoColl().List()
 }
 
-func SaveAndUploadService(projectName, serviceName string, copies []string, fileTree fs.FS) error {
-	localBase := config.LocalServicePath(projectName, serviceName)
-	s3Base := config.ObjectStorageServicePath(projectName, serviceName)
+func SaveAndUploadService(projectName, serviceName string, copies []string, fileTree fs.FS, isProduction bool) error {
+	var localBase, s3Base string
+	if !isProduction {
+		localBase = config.LocalTestServicePath(projectName, serviceName)
+		s3Base = config.ObjectStorageTestServicePath(projectName, serviceName)
+	} else {
+		localBase = config.LocalProductionServicePath(projectName, serviceName)
+		s3Base = config.ObjectStorageProductionServicePath(projectName, serviceName)
+	}
 	names := append([]string{serviceName}, copies...)
 	return fsservice.SaveAndUploadFiles(fileTree, names, localBase, s3Base, log.SugaredLogger())
 }
 
-func CopyAndUploadService(projectName, serviceName, currentChartPath string, copies []string) error {
-	localBase := config.LocalServicePath(projectName, serviceName)
-	s3Base := config.ObjectStorageServicePath(projectName, serviceName)
+func CopyAndUploadService(projectName, serviceName, currentChartPath string, copies []string, isProduction bool) error {
+	var localBase, s3Base string
+	if !isProduction {
+		localBase = config.LocalTestServicePath(projectName, serviceName)
+		s3Base = config.ObjectStorageTestServicePath(projectName, serviceName)
+	} else {
+		localBase = config.LocalProductionServicePath(projectName, serviceName)
+		s3Base = config.ObjectStorageProductionServicePath(projectName, serviceName)
+	}
 	names := append([]string{serviceName}, copies...)
 
 	return fsservice.CopyAndUploadFiles(names, path.Join(localBase, serviceName), s3Base, localBase, currentChartPath, log.SugaredLogger())
-}
-
-func GeneHelmRepo(chartRepo *commonmodels.HelmRepo) *repo.Entry {
-	return &repo.Entry{
-		Name:     chartRepo.RepoName,
-		URL:      chartRepo.URL,
-		Username: chartRepo.Username,
-		Password: chartRepo.Password,
-	}
 }

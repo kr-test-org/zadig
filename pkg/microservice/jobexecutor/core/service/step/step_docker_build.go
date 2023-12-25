@@ -28,10 +28,10 @@ import (
 
 	"gopkg.in/yaml.v2"
 
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/types/step"
-	"github.com/koderover/zadig/pkg/util/fs"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/types/step"
+	"github.com/koderover/zadig/v2/pkg/util/fs"
 )
 
 const dockerExe = "docker"
@@ -110,7 +110,7 @@ func (s *DockerBuildStep) runDockerBuild() error {
 		setProxy(s.spec)
 	}
 
-	fmt.Printf("Runing Docker Build.\n")
+	fmt.Printf("Running Docker Build.\n")
 	startTimeDockerBuild := time.Now()
 	envs := s.envs
 	for _, c := range s.dockerCommands() {
@@ -129,6 +129,9 @@ func (s *DockerBuildStep) runDockerBuild() error {
 
 func (s *DockerBuildStep) dockerCommands() []*exec.Cmd {
 	cmds := make([]*exec.Cmd, 0)
+	if s.spec.WorkDir == "" {
+		s.spec.WorkDir = "."
+	}
 	cmds = append(
 		cmds,
 		dockerBuildCmd(

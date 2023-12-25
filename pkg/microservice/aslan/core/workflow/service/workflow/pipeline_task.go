@@ -29,24 +29,24 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	configbase "github.com/koderover/zadig/pkg/config"
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models/task"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb/template"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/base"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/jira"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/s3"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/scmnotify"
-	"github.com/koderover/zadig/pkg/setting"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	krkubeclient "github.com/koderover/zadig/pkg/tool/kube/client"
-	"github.com/koderover/zadig/pkg/tool/kube/getter"
-	"github.com/koderover/zadig/pkg/tool/math"
-	s3tool "github.com/koderover/zadig/pkg/tool/s3"
-	"github.com/koderover/zadig/pkg/types"
+	configbase "github.com/koderover/zadig/v2/pkg/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models/task"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb/template"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/base"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/jira"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/s3"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/scmnotify"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	krkubeclient "github.com/koderover/zadig/v2/pkg/tool/kube/client"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/getter"
+	"github.com/koderover/zadig/v2/pkg/tool/math"
+	s3tool "github.com/koderover/zadig/v2/pkg/tool/s3"
+	"github.com/koderover/zadig/v2/pkg/types"
 )
 
 func CreatePipelineTask(args *commonmodels.TaskArgs, log *zap.SugaredLogger) (*CreateTaskResp, error) {
@@ -178,7 +178,7 @@ func CreatePipelineTask(args *commonmodels.TaskArgs, log *zap.SugaredLogger) (*C
 
 	var defaultStorageURI string
 	if defaultS3, err := s3.FindDefaultS3(); err == nil {
-		defaultStorageURI, err = defaultS3.GetEncryptedURL()
+		defaultStorageURI, err = defaultS3.GetEncrypted()
 		if err != nil {
 			return nil, e.ErrS3Storage.AddErr(err)
 		}
@@ -215,7 +215,7 @@ func CreatePipelineTask(args *commonmodels.TaskArgs, log *zap.SugaredLogger) (*C
 
 		t, err := base.ToDeployTask(t)
 		if err == nil && t.Enabled {
-			env, err := commonrepo.NewProductColl().FindEnv(&commonrepo.ProductEnvFindOptions{
+			env, err := commonrepo.NewProductColl().Find(&commonrepo.ProductFindOptions{
 				Namespace: pt.TaskArgs.Deploy.Namespace,
 				Name:      pt.ProductName,
 			})
@@ -742,6 +742,9 @@ func TestArgsToTestSubtask(args *commonmodels.TestTaskArgs, pt *task.Task, log *
 						if pr != 0 {
 							testArg.Builds[i].PRs = []int{pr}
 						}
+						if args.Branch != "" {
+							testArg.Builds[i].Branch = args.Branch
+						}
 					}
 				}
 
@@ -774,7 +777,6 @@ func TestArgsToTestSubtask(args *commonmodels.TestTaskArgs, pt *task.Task, log *
 				testTask.CacheDirType = testing.CacheDirType
 				testTask.CacheUserDir = testing.CacheUserDir
 			}
-
 			break
 		}
 	}
@@ -810,6 +812,7 @@ func TestArgsToTestSubtask(args *commonmodels.TestTaskArgs, pt *task.Task, log *
 		testTask.JobCtx.EnableProxy = testModule.PreTest.EnableProxy
 		testTask.Namespace = testModule.PreTest.Namespace
 		testTask.ClusterID = testModule.PreTest.ClusterID
+		testTask.StrategyID = testModule.PreTest.StrategyID
 
 		envs := testModule.PreTest.Envs[:]
 
@@ -823,7 +826,6 @@ func TestArgsToTestSubtask(args *commonmodels.TestTaskArgs, pt *task.Task, log *
 			}
 		}
 		envs = append(envs, &commonmodels.KeyVal{Key: "TEST_URL", Value: GetLink(pt, configbase.SystemAddress(), config.TestType)})
-		envs = append(envs, &commonmodels.KeyVal{Key: "WORKSPACE", Value: "/workspace"})
 		testTask.JobCtx.EnvVars = envs
 		testTask.ImageID = testModule.PreTest.ImageID
 		testTask.BuildOS = testModule.PreTest.BuildOS
@@ -847,6 +849,7 @@ func TestArgsToTestSubtask(args *commonmodels.TestTaskArgs, pt *task.Task, log *
 					Bucket:   storageInfo.Bucket,
 					Insecure: storageInfo.Insecure,
 					Provider: storageInfo.Provider,
+					Region:   storageInfo.Region,
 				}
 				testTask.JobCtx.UploadInfo = testModule.PostTest.ObjectStorageUpload.UploadDetail
 			}
@@ -1136,7 +1139,7 @@ func GePackageFileContent(pipelineName string, taskID int64, log *zap.SugaredLog
 			storageURL = resp.StorageURI
 		}
 	}
-	storage, err := s3.NewS3StorageFromEncryptedURI(storageURL)
+	storage, err := s3.UnmarshalNewS3StorageFromEncrypted(storageURL)
 	if err != nil {
 		log.Errorf("failed to get s3 storage %s", storageURL)
 		return nil, packageFile, fmt.Errorf("failed to get s3 storage %s", storageURL)

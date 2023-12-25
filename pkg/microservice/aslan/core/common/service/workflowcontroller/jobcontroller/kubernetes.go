@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mozillazg/go-pinyin"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v2"
@@ -45,39 +46,44 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crClient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/kube"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/multicluster/service"
-	"github.com/koderover/zadig/pkg/microservice/warpdrive/core/service/types/task"
-	"github.com/koderover/zadig/pkg/setting"
-	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
-	"github.com/koderover/zadig/pkg/shared/kube/wrapper"
-	"github.com/koderover/zadig/pkg/tool/kube/containerlog"
-	"github.com/koderover/zadig/pkg/tool/kube/getter"
-	"github.com/koderover/zadig/pkg/tool/kube/podexec"
-	"github.com/koderover/zadig/pkg/tool/kube/updater"
-	"github.com/koderover/zadig/pkg/tool/log"
-	s3tool "github.com/koderover/zadig/pkg/tool/s3"
-	commontypes "github.com/koderover/zadig/pkg/types"
-	"github.com/koderover/zadig/pkg/types/job"
-	"github.com/koderover/zadig/pkg/util"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/kube"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/multicluster/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/warpdrive/core/service/types/task"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	kubeclient "github.com/koderover/zadig/v2/pkg/shared/kube/client"
+	"github.com/koderover/zadig/v2/pkg/shared/kube/wrapper"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/containerlog"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/getter"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/podexec"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/updater"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	s3tool "github.com/koderover/zadig/v2/pkg/tool/s3"
+	commontypes "github.com/koderover/zadig/v2/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/types/job"
+	"github.com/koderover/zadig/v2/pkg/util"
 )
 
 const (
-	BusyBoxImage            = "koderover.tencentcloudcr.com/koderover-public/busybox:latest"
-	ZadigContextDir         = "/zadig/"
-	ZadigLogFile            = ZadigContextDir + "zadig.log"
-	ZadigLifeCycleFile      = ZadigContextDir + "lifecycle"
-	JobExecutorFile         = "http://resource-server/jobexecutor"
-	ResourceServer          = "resource-server"
-	defaultSecretEmail      = "bot@koderover.com"
-	registrySecretSuffix    = "-registry-secret"
-	workflowConfigMapRoleSA = "workflow-cm-sa"
+	BusyBoxImage               = "koderover.tencentcloudcr.com/koderover-public/busybox:latest"
+	ZadigContextDir            = "/zadig/"
+	ZadigLogFile               = ZadigContextDir + "zadig.log"
+	ZadigLifeCycleFile         = ZadigContextDir + "lifecycle"
+	ExecutorResourceVolumeName = "executor-resource"
+	ExecutorVolumePath         = "/executor"
+	JobExecutorFile            = ExecutorVolumePath + "/jobexecutor"
+	defaultSecretEmail         = "bot@koderover.com"
+	registrySecretSuffix       = "-registry-secret"
+	workflowConfigMapRoleSA    = "workflow-cm-sa"
 
 	defaultRetryCount    = 3
 	defaultRetryInterval = time.Second * 3
+
+	// build job outputs key
+	IMAGEKEY    = "IMAGE"
+	IMAGETAGKEY = "imageTag"
 )
 
 func GetK8sClients(hubServerAddr, clusterID string) (crClient.Client, kubernetes.Interface, *rest.Config, crClient.Reader, error) {
@@ -133,6 +139,26 @@ func getJobLabels(jobLabel *JobLabel) map[string]string {
 	return retMap
 }
 
+func GetJobContainerName(name string) string {
+	pyArgs := pinyin.NewArgs()
+	pyArgs.Fallback = func(r rune, a pinyin.Args) []string {
+		return []string{string(r)}
+	}
+
+	res := pinyin.Pinyin(name, pyArgs)
+
+	pinyins := make([]string, 0)
+	for _, py := range res {
+		pinyins = append(pinyins, strings.Join(py, ""))
+	}
+
+	resp := strings.Join(pinyins, "")
+	if len(resp) > 63 {
+		return resp[:63]
+	}
+	return resp
+}
+
 func createJobConfigMap(namespace, jobName string, jobLabel *JobLabel, jobCtx string, kubeClient crClient.Client) error {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -160,13 +186,23 @@ func getBaseImage(buildOS, imageFrom string) string {
 	return jobImage
 }
 
-func buildTolerations(clusterConfig *commonmodels.AdvancedConfig) []corev1.Toleration {
+func buildTolerations(clusterConfig *commonmodels.AdvancedConfig, strategyID string) []corev1.Toleration {
 	ret := make([]corev1.Toleration, 0)
-	if clusterConfig == nil || len(clusterConfig.Tolerations) == 0 {
+	if clusterConfig == nil || len(clusterConfig.ScheduleStrategy) == 0 {
 		return ret
 	}
 
-	err := yaml.Unmarshal([]byte(clusterConfig.Tolerations), &ret)
+	var tolerations string
+	for _, strategy := range clusterConfig.ScheduleStrategy {
+		if strategyID != "" && strategy.StrategyID == strategyID {
+			tolerations = strategy.Tolerations
+			break
+		} else if strategyID == "" && strategy.Default {
+			tolerations = strategy.Tolerations
+			break
+		}
+	}
+	err := yaml.Unmarshal([]byte(tolerations), &ret)
 	if err != nil {
 		log.Errorf("failed to parse toleration config, err: %s", err)
 		return nil
@@ -174,15 +210,29 @@ func buildTolerations(clusterConfig *commonmodels.AdvancedConfig) []corev1.Toler
 	return ret
 }
 
-func addNodeAffinity(clusterConfig *commonmodels.AdvancedConfig) *corev1.Affinity {
-	if clusterConfig == nil || len(clusterConfig.NodeLabels) == 0 {
+func addNodeAffinity(clusterConfig *commonmodels.AdvancedConfig, strategyID string) *corev1.Affinity {
+	if clusterConfig == nil || len(clusterConfig.ScheduleStrategy) == 0 {
 		return nil
 	}
 
-	switch clusterConfig.Strategy {
+	var strategy *commonmodels.ScheduleStrategy
+	for _, s := range clusterConfig.ScheduleStrategy {
+		if strategyID != "" && s.StrategyID == strategyID {
+			strategy = s
+			break
+		} else if strategyID == "" && s.Default {
+			strategy = s
+			break
+		}
+	}
+	if strategy == nil {
+		return nil
+	}
+
+	switch strategy.Strategy {
 	case setting.RequiredSchedule:
 		nodeSelectorTerms := make([]corev1.NodeSelectorTerm, 0)
-		for _, nodeLabel := range clusterConfig.NodeLabels {
+		for _, nodeLabel := range strategy.NodeLabels {
 			var matchExpressions []corev1.NodeSelectorRequirement
 			matchExpressions = append(matchExpressions, corev1.NodeSelectorRequirement{
 				Key:      nodeLabel.Key,
@@ -204,7 +254,7 @@ func addNodeAffinity(clusterConfig *commonmodels.AdvancedConfig) *corev1.Affinit
 		return affinity
 	case setting.PreferredSchedule:
 		preferredScheduleTerms := make([]corev1.PreferredSchedulingTerm, 0)
-		for _, nodeLabel := range clusterConfig.NodeLabels {
+		for _, nodeLabel := range strategy.NodeLabels {
 			var matchExpressions []corev1.NodeSelectorRequirement
 			matchExpressions = append(matchExpressions, corev1.NodeSelectorRequirement{
 				Key:      nodeLabel.Key,
@@ -305,7 +355,7 @@ echo $result > %s
 					Containers: []corev1.Container{
 						{
 							ImagePullPolicy: corev1.PullAlways,
-							Name:            jobTask.Name,
+							Name:            GetJobContainerName(jobTask.Name),
 							Image:           jobTaskSpec.Plugin.Image,
 							Args:            jobTaskSpec.Plugin.Args,
 							Command:         jobTaskSpec.Plugin.Cmds,
@@ -347,8 +397,8 @@ echo $result > %s
 							},
 						},
 					},
-					Tolerations: buildTolerations(targetCluster.AdvancedConfig),
-					Affinity:    addNodeAffinity(targetCluster.AdvancedConfig),
+					Tolerations: buildTolerations(targetCluster.AdvancedConfig, jobTaskSpec.Properties.StrategyID),
+					Affinity:    addNodeAffinity(targetCluster.AdvancedConfig, jobTaskSpec.Properties.StrategyID),
 				},
 			},
 		},
@@ -359,24 +409,10 @@ echo $result > %s
 }
 
 func buildJob(jobType, jobImage, jobName, clusterID, currentNamespace string, resReq setting.Request, resReqSpec setting.RequestSpec, jobTask *commonmodels.JobTask, jobTaskSpec *commonmodels.JobTaskFreestyleSpec, workflowCtx *commonmodels.WorkflowTaskCtx, registries []*task.RegistryNamespace) (*batchv1.Job, error) {
-	// 	tailLogCommandTemplate := `tail -f %s &
-	// while [ -f %s ];
-	// do
-	// 	sleep 1s;
-	// done;
-	// `
-	// 	tailLogCommand := fmt.Sprintf(tailLogCommandTemplate, ZadigLogFile, ZadigLifeCycleFile)
-
 	var (
 		jobExecutorBootingScript string
 		jobExecutorBinaryFile    = JobExecutorFile
 	)
-	// not local cluster
-	if clusterID != "" && clusterID != setting.LocalClusterID {
-		jobExecutorBinaryFile = strings.Replace(jobExecutorBinaryFile, ResourceServer, ResourceServer+".koderover-agent", -1)
-	} else {
-		jobExecutorBinaryFile = strings.Replace(jobExecutorBinaryFile, ResourceServer, ResourceServer+"."+currentNamespace, -1)
-	}
 
 	if clusterID == "" {
 		clusterID = setting.LocalClusterID
@@ -394,10 +430,10 @@ func buildJob(jobType, jobImage, jobName, clusterID, currentNamespace string, re
 	if jobTask.BreakpointAfter {
 		jobExecutorBootingScript += fmt.Sprintf("touch %sdebug/breakpoint_after;", ZadigContextDir)
 	}
-	jobExecutorBootingScript += fmt.Sprintf("curl -m 10 --retry-delay 3 --retry 3 -sSL %s -o reaper && chmod +x reaper && mv reaper /usr/local/bin && /usr/local/bin/reaper", jobExecutorBinaryFile)
+	jobExecutorBootingScript += jobExecutorBinaryFile
 
 	labels := getJobLabels(&JobLabel{
-		JobType: string(jobType),
+		JobType: jobType,
 		JobName: jobTask.K8sJobName,
 	})
 
@@ -427,50 +463,38 @@ func buildJob(jobType, jobImage, jobName, clusterID, currentNamespace string, re
 					RestartPolicy:      corev1.RestartPolicyNever,
 					ImagePullSecrets:   ImagePullSecrets,
 					ServiceAccountName: workflowConfigMapRoleSA,
-					// InitContainers: []corev1.Container{
-					// 	{
-					// 		ImagePullPolicy: corev1.PullIfNotPresent,
-					// 		Name:            "init-log-file",
-					// 		Image:           BusyBoxImage,
-					// 		VolumeMounts:    getVolumeMounts(workflowCtx.ConfigMapMountDir),
-					// 		Command:         []string{"/bin/sh", "-c", fmt.Sprintf("touch %s %s", ZadigLogFile, ZadigLifeCycleFile)},
-					// 	},
-					// },
+					InitContainers: []corev1.Container{
+						{
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Name:            "executor-resource-init",
+							Image:           config.ExecutorImage(),
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      ExecutorResourceVolumeName,
+									MountPath: ExecutorVolumePath,
+								},
+							},
+							Command: []string{"/bin/sh", "-c", fmt.Sprintf("cp /app/* %s", ExecutorVolumePath)},
+						},
+					},
 					Containers: []corev1.Container{
 						{
 							ImagePullPolicy: corev1.PullAlways,
-							Name:            jobTask.Name,
+							Name:            GetJobContainerName(strings.ReplaceAll(jobTask.Name, "_", "-")),
 							Image:           jobImage,
 							Command:         []string{"/bin/sh", "-c"},
 							Args:            []string{jobExecutorBootingScript},
-							// Command:         []string{"/bin/sh", "-c", "jobexecutor"},
-							// Lifecycle: &corev1.Lifecycle{
-							// 	PreStop: &corev1.Handler{
-							// 		Exec: &corev1.ExecAction{
-							// 			Command: []string{"/bin/sh", "-c", fmt.Sprintf("rm %s", ZadigLifeCycleFile)},
-							// 		},
-							// 	},
-							// },
-							Env:          getEnvs(workflowCtx.ConfigMapMountDir, jobTaskSpec),
-							VolumeMounts: getVolumeMounts(workflowCtx.ConfigMapMountDir, jobTaskSpec.Properties.UseHostDockerDaemon),
-							Resources:    getResourceRequirements(resReq, resReqSpec),
+							Env:             getEnvs(workflowCtx.ConfigMapMountDir, jobTaskSpec),
+							VolumeMounts:    getVolumeMounts(workflowCtx.ConfigMapMountDir, jobTaskSpec.Properties.UseHostDockerDaemon),
+							Resources:       getResourceRequirements(resReq, resReqSpec),
 
 							TerminationMessagePolicy: corev1.TerminationMessageReadFile,
 							TerminationMessagePath:   job.JobTerminationFile,
 						},
-						// {
-						// 	ImagePullPolicy: corev1.PullIfNotPresent,
-						// 	Name:            "log",
-						// 	Image:           BusyBoxImage,
-						// 	VolumeMounts:    getVolumeMounts(workflowCtx.ConfigMapMountDir),
-						// 	Command:         []string{"/bin/sh", "-c"},
-						// 	Args:            []string{tailLogCommand},
-						// 	Lifecycle:       &corev1.Lifecycle{},
-						// },
 					},
 					Volumes:     getVolumes(jobName, jobTaskSpec.Properties.UseHostDockerDaemon),
-					Tolerations: buildTolerations(targetCluster.AdvancedConfig),
-					Affinity:    addNodeAffinity(targetCluster.AdvancedConfig),
+					Tolerations: buildTolerations(targetCluster.AdvancedConfig, jobTaskSpec.Properties.StrategyID),
+					Affinity:    addNodeAffinity(targetCluster.AdvancedConfig, jobTaskSpec.Properties.StrategyID),
 				},
 			},
 		},
@@ -541,8 +565,8 @@ func BuildCleanJob(jobName, clusterID, workflowName string, taskID int64) (*batc
 							TerminationMessagePath:   job.JobTerminationFile,
 						},
 					},
-					Tolerations: buildTolerations(targetCluster.AdvancedConfig),
-					Affinity:    addNodeAffinity(targetCluster.AdvancedConfig),
+					Tolerations: buildTolerations(targetCluster.AdvancedConfig, ""),
+					Affinity:    addNodeAffinity(targetCluster.AdvancedConfig, ""),
 				},
 			},
 		},
@@ -658,6 +682,10 @@ func getVolumeMounts(configMapMountDir string, userHostDockerDaemon bool) []core
 		Name:      "zadig-context",
 		MountPath: ZadigContextDir,
 	})
+	resp = append(resp, corev1.VolumeMount{
+		Name:      ExecutorResourceVolumeName,
+		MountPath: ExecutorVolumePath,
+	})
 	if userHostDockerDaemon {
 		resp = append(resp, corev1.VolumeMount{
 			Name:      "docker-sock",
@@ -681,6 +709,12 @@ func getVolumes(jobName string, userHostDockerDaemon bool) []corev1.Volume {
 	})
 	resp = append(resp, corev1.Volume{
 		Name: "zadig-context",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	})
+	resp = append(resp, corev1.Volume{
+		Name: ExecutorResourceVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		},
@@ -856,6 +890,13 @@ func waitJobStart(ctx context.Context, namespace, jobName string, kubeClient crC
 					continue
 				}
 				for _, pod := range podList {
+					if pod.Status.Phase == corev1.PodFailed {
+						msg := ""
+						for _, condition := range pod.Status.Conditions {
+							msg += fmt.Sprintf("type:%s, status:%s, reason:%s, message:%s\n", condition.Type, condition.Status, condition.Reason, condition.Message)
+						}
+						return config.StatusFailed, fmt.Errorf("waitJobStart: pod failed, jobName:%s, podName:%s\nconditions info: %s", jobName, pod.Name, msg)
+					}
 					if pod.Status.Phase != corev1.PodPending {
 						xl.Infof("waitJobStart: pod status %s namespace:%s, jobName:%s podList num %d", pod.Status.Phase, namespace, jobName, len(podList))
 						return config.StatusRunning, nil
@@ -904,9 +945,6 @@ func waitJobEndByCheckingConfigMap(ctx context.Context, taskTimeout <-chan time.
 	podLister := informer.Core().V1().Pods().Lister().Pods(namespace)
 	jobLister := informer.Batch().V1().Jobs().Lister().Jobs(namespace)
 	cmLister := informer.Core().V1().ConfigMaps().Lister().ConfigMaps(namespace)
-
-	// debugStage is used to record which debug stage the job has reached
-	var debugStageBefore, debugStageBeforeDone, debugStageAfter, debugStageAfterDone bool
 	for {
 		select {
 		case <-ctx.Done():
@@ -922,8 +960,16 @@ func waitJobEndByCheckingConfigMap(ctx context.Context, taskTimeout <-chan time.
 				xl.Errorf(errMsg)
 				return config.StatusFailed, errMsg
 			}
+			// configMap name is the same as the k8s job name
+			cm, err := cmLister.Get(jobName)
+			if err != nil {
+				errMsg := fmt.Sprintf("failed to get job context configMap job-name=%s %v", jobName, err)
+				xl.Errorf(errMsg)
+				return config.StatusFailed, errMsg
+			}
 			// pod is still running
-			if job.Status.Active != 0 {
+			switch {
+			case job.Status.Active != 0:
 				pods, err := podLister.List(labels.Set{"job-name": jobName}.AsSelector())
 				if err != nil {
 					errMsg := fmt.Sprintf("failed to find pod with label job-name=%s %v", jobName, err)
@@ -940,50 +986,25 @@ func waitJobEndByCheckingConfigMap(ctx context.Context, taskTimeout <-chan time.
 					}
 					if !ipod.Finished() {
 						// check container whether is stuck in debug stage by checking stage file, if so, update job status to debug
-						if !debugStageBefore {
-							if found, _ := checkFileExistsWithRetry(clientset, restConfig, namespace, ipod.Name, ipod.ContainerNames()[0],
-								ZadigContextDir+"debug/debug_before", defaultRetryCount, defaultRetryInterval); found {
-								jobTask.Status = config.StatusDebugBefore
-								ack()
-								debugStageBefore = true
-							}
-						}
-						if debugStageBefore && !debugStageBeforeDone {
-							if found, _ := checkFileExistsWithRetry(clientset, restConfig, namespace, ipod.Name, ipod.ContainerNames()[0],
-								ZadigContextDir+"debug/debug_before_done", defaultRetryCount, defaultRetryInterval); found {
+						switch cm.Data[commontypes.JobDebugStatusKey] {
+						case commontypes.JobDebugStatusBefore:
+							jobTask.Status = config.StatusDebugBefore
+							ack()
+						case commontypes.JobDebugStatusAfter:
+							jobTask.Status = config.StatusDebugAfter
+							ack()
+						case commontypes.JobDebugStatusNotIn:
+							if jobTask.Status == config.StatusDebugBefore || jobTask.Status == config.StatusDebugAfter {
 								jobTask.Status = config.StatusRunning
 								ack()
-								debugStageBeforeDone = true
-							}
-						}
-						if !debugStageAfter {
-							if found, _ := checkFileExistsWithRetry(clientset, restConfig, namespace, ipod.Name, ipod.ContainerNames()[0],
-								ZadigContextDir+"debug/debug_after", defaultRetryCount, defaultRetryInterval); found {
-								jobTask.Status = config.StatusDebugAfter
-								ack()
-								debugStageAfter = true
-								// if job in debug_after step, it is unnecessary to check debug_before step
-								debugStageBefore = true
-							}
-						}
-						if debugStageAfter && !debugStageAfterDone {
-							if found, _ := checkFileExistsWithRetry(clientset, restConfig, namespace, ipod.Name, ipod.ContainerNames()[0],
-								ZadigContextDir+"debug/debug_after_done", defaultRetryCount, defaultRetryInterval); found {
-								jobTask.Status = config.StatusRunning
-								ack()
-								debugStageAfterDone = true
 							}
 						}
 					}
 				}
-
-			}
-			// configMap name is the same as the k8s job name
-			cm, err := cmLister.Get(jobName)
-			if err != nil {
-				errMsg := fmt.Sprintf("failed to get job context configMap job-name=%s %v", jobName, err)
-				xl.Errorf(errMsg)
-				return config.StatusFailed, errMsg
+			case job.Status.Succeeded != 0:
+				return config.StatusPassed, ""
+			case job.Status.Failed != 0:
+				return config.StatusFailed, ""
 			}
 			if status, ok := cm.Data[commontypes.JobResultKey]; ok {
 				switch commontypes.JobStatus(status) {
@@ -1052,9 +1073,27 @@ func getJobOutputFromConfigMap(namespace, containerName string, jobTask *commonm
 
 func writeOutputs(outputs []*job.JobOutput, outputKey string, workflowCtx *commonmodels.WorkflowTaskCtx) {
 	// write jobs output info to globalcontext so other job can use like this {{.job.jobKey.output.outputName}}
+	outputsMap := make(map[string]*job.JobOutput)
 	for _, output := range outputs {
+		outputsMap[output.Name] = output
+	}
+	if tag, ok := outputsMap[IMAGETAGKEY]; ok {
+		if image, ok := outputsMap[IMAGEKEY]; ok {
+			tag.Value = getTagFromImageName(image.Value)
+		}
+	}
+	for _, output := range outputsMap {
 		workflowCtx.GlobalContextSet(job.GetJobOutputKey(outputKey, output.Name), output.Value)
 	}
+}
+
+func getTagFromImageName(imageName string) string {
+	parts := strings.Split(imageName, ":")
+	if len(parts) > 1 {
+		return parts[len(parts)-1]
+	}
+
+	return "latest"
 }
 
 func saveContainerLog(namespace, clusterID, workflowName, jobName string, taskID int64, jobLabel *JobLabel, kubeClient crClient.Client) error {

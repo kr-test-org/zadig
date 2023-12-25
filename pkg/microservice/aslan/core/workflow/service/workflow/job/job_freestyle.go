@@ -18,19 +18,20 @@ package job
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"go.uber.org/zap"
 
-	configbase "github.com/koderover/zadig/pkg/config"
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/util"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/types"
-	steptypes "github.com/koderover/zadig/pkg/types/step"
+	configbase "github.com/koderover/zadig/v2/pkg/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/util"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/types"
+	steptypes "github.com/koderover/zadig/v2/pkg/types/step"
 )
 
 type FreeStyleJob struct {
@@ -65,6 +66,12 @@ func (j *FreeStyleJob) Instantiate() error {
 			step.Spec = stepSpec
 		case config.StepShell:
 			stepSpec := &steptypes.StepShellSpec{}
+			if err := commonmodels.IToiYaml(step.Spec, stepSpec); err != nil {
+				return fmt.Errorf("parse shell step spec error: %v", err)
+			}
+			step.Spec = stepSpec
+		case config.StepBatchFile:
+			stepSpec := &steptypes.StepBatchFileSpec{}
 			if err := commonmodels.IToiYaml(step.Spec, stepSpec); err != nil {
 				return fmt.Errorf("parse shell step spec error: %v", err)
 			}
@@ -197,6 +204,12 @@ func (j *FreeStyleJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 		Timeout: j.spec.Properties.Timeout,
 		Outputs: j.spec.Outputs,
 	}
+
+	if j.spec != nil && j.spec.Properties != nil && j.spec.Properties.Infrastructure != "" && len(j.spec.Properties.VMLabels) > 0 {
+		jobTask.Infrastructure = j.spec.Properties.Infrastructure
+		jobTask.VMLabels = j.spec.Properties.VMLabels
+	}
+
 	registries, err := commonservice.ListRegistryNamespaces("", true, logger)
 	if err != nil {
 		return resp, err
@@ -211,7 +224,7 @@ func (j *FreeStyleJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 	jobTaskSpec.Properties.BuildOS = basicImage.Value
 	// save user defined variables.
 	jobTaskSpec.Properties.CustomEnvs = jobTaskSpec.Properties.Envs
-	jobTaskSpec.Properties.Envs = append(jobTaskSpec.Properties.Envs, getfreestyleJobVariables(jobTaskSpec.Steps, taskID, j.workflow.Project, j.workflow.Name)...)
+	jobTaskSpec.Properties.Envs = append(jobTaskSpec.Properties.Envs, getfreestyleJobVariables(jobTaskSpec.Steps, taskID, j.workflow.Project, j.workflow.Name, j.workflow.DisplayName, jobTask.Infrastructure)...)
 	return []*commonmodels.JobTask{jobTask}, nil
 }
 
@@ -296,7 +309,7 @@ func (j *FreeStyleJob) stepsToStepTasks(step []*commonmodels.Step) []*commonmode
 	return resp
 }
 
-func getfreestyleJobVariables(steps []*commonmodels.StepTask, taskID int64, project, workflowName string) []*commonmodels.KeyVal {
+func getfreestyleJobVariables(steps []*commonmodels.StepTask, taskID int64, project, workflowName, workflowDisplayName, infrastructure string) []*commonmodels.KeyVal {
 	ret := []*commonmodels.KeyVal{}
 	repos := []*types.Repository{}
 	for _, step := range steps {
@@ -310,13 +323,12 @@ func getfreestyleJobVariables(steps []*commonmodels.StepTask, taskID int64, proj
 		}
 		repos = append(repos, stepSpec.Repos...)
 	}
+	// basic envs
+	ret = append(ret, PrepareDefaultWorkflowTaskEnvs(project, workflowName, workflowDisplayName, infrastructure, taskID)...)
+	// repo envs
 	ret = append(ret, getReposVariables(repos)...)
-	for _, repo := range repos {
-		ret = append(ret, &commonmodels.KeyVal{Key: repo.RepoName + "_ORG", Value: repo.RepoOwner, IsCredential: false})
-	}
-	ret = append(ret, &commonmodels.KeyVal{Key: "PROJECT", Value: project, IsCredential: false})
-	ret = append(ret, &commonmodels.KeyVal{Key: "TASK_ID", Value: fmt.Sprintf("%d", taskID), IsCredential: false})
-	buildURL := fmt.Sprintf("%s/v1/projects/detail/%s/pipelines/custom/%s/%d", configbase.SystemAddress(), project, workflowName, taskID)
+
+	buildURL := fmt.Sprintf("%s/v1/projects/detail/%s/pipelines/custom/%s/%d?display_name=%s", configbase.SystemAddress(), project, workflowName, taskID, url.QueryEscape(workflowDisplayName))
 	ret = append(ret, &commonmodels.KeyVal{Key: "BUILD_URL", Value: buildURL, IsCredential: false})
 	return ret
 }

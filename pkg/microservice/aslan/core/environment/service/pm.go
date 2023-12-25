@@ -20,6 +20,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/hashicorp/go-multierror"
 	"go.uber.org/zap"
@@ -27,15 +28,15 @@ import (
 	"k8s.io/client-go/informers"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/pm"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/workflow"
-	"github.com/koderover/zadig/pkg/setting"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	"github.com/koderover/zadig/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/pm"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/workflow/service/workflow"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
 )
 
 type PMService struct {
@@ -87,7 +88,7 @@ func (p *PMService) updateService(args *SvcOptArgs) error {
 	return nil
 }
 
-func (p *PMService) listGroupServices(allServices []*commonmodels.ProductService, envName, productName string, informer informers.SharedInformerFactory, productInfo *commonmodels.Product) []*commonservice.ServiceResp {
+func (p *PMService) listGroupServices(allServices []*commonmodels.ProductService, envName string, informer informers.SharedInformerFactory, productInfo *commonmodels.Product) []*commonservice.ServiceResp {
 	var wg sync.WaitGroup
 	var resp []*commonservice.ServiceResp
 	var mutex sync.RWMutex
@@ -161,7 +162,7 @@ func (p *PMService) listGroupServices(allServices []*commonmodels.ProductService
 	return resp
 }
 
-func (p *PMService) createGroup(username string, product *commonmodels.Product, group []*commonmodels.ProductService, renderSet *commonmodels.RenderSet, inf informers.SharedInformerFactory, kubeClient client.Client) error {
+func (p *PMService) createGroup(username string, product *commonmodels.Product, group []*commonmodels.ProductService, inf informers.SharedInformerFactory, kubeClient client.Client) error {
 	envName, productName := product.EnvName, product.ProductName
 	p.log.Infof("[Namespace:%s][Product:%s] createGroup", envName, productName)
 
@@ -212,7 +213,6 @@ func (p *PMService) createGroup(username string, product *commonmodels.Product, 
 					ServiceTmplObject: &commonservice.ServiceTmplObject{
 						ProductName:  serviceTempl.ProductName,
 						ServiceName:  serviceTempl.ServiceName,
-						Visibility:   serviceTempl.Visibility,
 						Revision:     serviceTempl.Revision,
 						Type:         serviceTempl.Type,
 						Username:     username,
@@ -237,10 +237,12 @@ func (p *PMService) createGroup(username string, product *commonmodels.Product, 
 		// 更新环境
 		if latestRevision > productService.Revision {
 			// 更新产品服务
-			for _, serviceGroup := range prod.Services {
+			for i, serviceGroup := range prod.Services {
 				for j, service := range serviceGroup {
 					if service.ServiceName == productService.ServiceName && service.Type == setting.PMDeployType {
-						serviceGroup[j].Revision = latestRevision
+						prod.Services[i][j].Revision = latestRevision
+						productService.Revision = latestRevision
+						prod.Services[i][j].UpdateTime = time.Now().Unix()
 					}
 				}
 			}

@@ -28,16 +28,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/setting"
-	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
-	"github.com/koderover/zadig/pkg/shared/kube/wrapper"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	"github.com/koderover/zadig/pkg/tool/kube/getter"
-	"github.com/koderover/zadig/pkg/tool/kube/podexec"
-	"github.com/koderover/zadig/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	kubeclient "github.com/koderover/zadig/v2/pkg/shared/kube/client"
+	"github.com/koderover/zadig/v2/pkg/shared/kube/wrapper"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/getter"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/podexec"
+	"github.com/koderover/zadig/v2/pkg/types"
 )
 
 var cleanCacheLock sync.Mutex
@@ -85,6 +85,7 @@ func CleanImageCache(logger *zap.SugaredLogger) error {
 	// TODO: We should return immediately instead of waiting for the lock if a cleanup task is performed.
 	//       Since `golang-1.18`, `sync.Mutex` provides a `TryLock()` method. For now, we can continue with the previous
 	//       logic and replace it with `TryLock()` after upgrading to `golang-1.18+` to return immediately.
+	startTime := time.Now()
 	cleanCacheLock.Lock()
 	defer cleanCacheLock.Unlock()
 
@@ -117,11 +118,22 @@ func CleanImageCache(logger *zap.SugaredLogger) error {
 
 	dindPods, err := getDindPods()
 	if err != nil {
-		logger.Errorf("Failed to list dind pods: %s", err)
-		return commonrepo.NewDindCleanColl().UpdateStatusInfo(&commonmodels.DindClean{
+		msg := fmt.Errorf("failed to clean dind cache: %v", err).Error()
+		cleanInfos := []*commonmodels.DindCleanInfo{{
+			StartTime:    startTime.Unix(),
+			EndTime:      time.Now().Unix(),
+			PodName:      "N/A",
+			ErrorMessage: msg,
+		}}
+		err = commonrepo.NewDindCleanColl().UpdateStatusInfo(&commonmodels.DindClean{
 			Status:         CleanStatusFailed,
-			DindCleanInfos: []*commonmodels.DindCleanInfo{},
-		})
+			DindCleanInfos: cleanInfos})
+
+		if err != nil {
+			logger.Errorf("failed to update dind clean status: %s", err)
+			msg = fmt.Sprintf("%s, and failed to update dind clean status, err: %v", msg, err)
+		}
+		return e.ErrCleanDindClean.AddDesc(msg)
 	}
 	logger.Infof("Total dind Pods to be cleaned up: %d", len(dindPods))
 
@@ -139,6 +151,13 @@ func CleanImageCache(logger *zap.SugaredLogger) error {
 		dindInfos := make([]*commonmodels.DindCleanInfo, 0, len(dindPods))
 		var wg sync.WaitGroup
 		for _, dindPod := range dindPods {
+			if dindPod.Err != nil {
+				dindInfos = append(dindInfos, &commonmodels.DindCleanInfo{
+					PodName:      fmt.Sprintf("%s:N/A", dindPod.ClusterName),
+					ErrorMessage: dindPod.Err.Error(),
+				})
+				continue
+			}
 			if !wrapper.Pod(dindPod.Pod).Ready() {
 				continue
 			}
@@ -275,7 +294,13 @@ func getDindPods() ([]types.DindPod, error) {
 
 		pods, err := getDindPodsInCluster(clusterID, ns)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get dind pods in ns %q of cluster %q: %s", ns, clusterID, err)
+			msg := fmt.Errorf("failed to get dind pods in ns %q of cluster %q: %s", ns, clusterID, err)
+			dindPods = append(dindPods, types.DindPod{
+				ClusterID:   clusterID,
+				ClusterName: cluster.Name,
+				Err:         msg,
+			})
+			continue
 		}
 
 		for _, pod := range pods {

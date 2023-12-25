@@ -26,11 +26,12 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"gorm.io/gorm/utils"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/setting"
-	mongotool "github.com/koderover/zadig/pkg/tool/mongo"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	mongotool "github.com/koderover/zadig/v2/pkg/tool/mongo"
 )
 
 type WorkflowV4Coll struct {
@@ -40,10 +41,12 @@ type WorkflowV4Coll struct {
 }
 
 type ListWorkflowV4Option struct {
-	ProjectName string
-	DisplayName string
-	Names       []string
-	Category    setting.WorkflowCategory
+	ProjectName    string
+	DisplayName    string
+	Names          []string
+	Category       setting.WorkflowCategory
+	JobTypes       []config.JobType
+	Infrastructure string
 }
 
 func NewWorkflowV4Coll() *WorkflowV4Coll {
@@ -177,6 +180,37 @@ func (c *WorkflowV4Coll) Create(obj *models.WorkflowV4) (string, error) {
 	return ID.Hex(), err
 }
 
+type SetCustomFieldsOptions struct {
+	ProjectName  string
+	WorkflowName string
+}
+
+func (c *WorkflowV4Coll) SetCustomFields(opts SetCustomFieldsOptions, args *models.CustomField) error {
+	if args == nil {
+		return nil
+	}
+
+	query := bson.M{"project": opts.ProjectName, "name": opts.WorkflowName}
+	change := bson.M{"$set": bson.M{"custom_field": args}}
+	_, err := c.UpdateOne(context.TODO(), query, change)
+	return err
+}
+
+type WorkFlowOptions struct {
+	ProjectName  string
+	WorkflowName string
+}
+
+func (c *WorkflowV4Coll) FindByOptions(opts WorkFlowOptions) (*models.WorkflowV4, error) {
+	workflow := &models.WorkflowV4{}
+	query := bson.M{"project": opts.ProjectName, "name": opts.WorkflowName}
+	err := c.FindOne(context.Background(), query).Decode(&workflow)
+	if err != nil {
+		return nil, err
+	}
+	return workflow, nil
+}
+
 func (c *WorkflowV4Coll) Count() (int64, error) {
 	query := bson.M{}
 
@@ -203,6 +237,9 @@ func (c *WorkflowV4Coll) List(opt *ListWorkflowV4Option, pageNum, pageSize int64
 	}
 	if opt.Category != "" {
 		query["category"] = opt.Category
+	}
+	if len(opt.JobTypes) > 0 {
+		query["stages.jobs.type"] = bson.M{"$in": opt.JobTypes}
 	}
 	count, err := c.CountDocuments(context.TODO(), query)
 	if err != nil {
@@ -292,5 +329,31 @@ func (c *WorkflowV4Coll) ListByCursor(opt *ListWorkflowV4Option) (*mongo.Cursor,
 	if len(opt.Names) > 0 {
 		query["name"] = bson.M{"$in": opt.Names}
 	}
+	if len(opt.JobTypes) > 0 {
+		query["stages.jobs.type"] = bson.M{"$in": opt.JobTypes}
+	}
+
 	return c.Collection.Find(context.TODO(), query)
+}
+
+func (c *WorkflowV4Coll) GetJobNameList(projectName, workflowName, jobType string) ([]string, error) {
+	workflow := new(models.WorkflowV4)
+	query := bson.M{"project": projectName, "name": workflowName}
+
+	err := c.FindOne(context.Background(), query).Decode(&workflow)
+	if err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0)
+	for _, stage := range workflow.Stages {
+		for _, job := range stage.Jobs {
+			if string(job.JobType) == jobType {
+				if !utils.Contains(names, job.Name) {
+					names = append(names, job.Name)
+				}
+			}
+		}
+	}
+	return names, nil
 }

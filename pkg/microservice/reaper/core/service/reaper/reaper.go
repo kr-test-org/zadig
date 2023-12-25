@@ -31,15 +31,15 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/koderover/zadig/pkg/tool/s3"
-	"github.com/koderover/zadig/pkg/tool/sonar"
+	"github.com/koderover/zadig/v2/pkg/tool/s3"
+	"github.com/koderover/zadig/v2/pkg/tool/sonar"
 
-	"github.com/koderover/zadig/pkg/microservice/reaper/config"
-	"github.com/koderover/zadig/pkg/microservice/reaper/core/service/meta"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/types"
-	"github.com/koderover/zadig/pkg/util/fs"
+	"github.com/koderover/zadig/v2/pkg/microservice/reaper/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/reaper/core/service/meta"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/util/fs"
 )
 
 const (
@@ -300,6 +300,9 @@ func (r *Reaper) setProxy(ctx *meta.DockerBuildCtx, cfg *meta.Proxy) {
 
 func (r *Reaper) dockerCommands() []*exec.Cmd {
 	cmds := make([]*exec.Cmd, 0)
+	if r.Ctx.DockerBuildCtx.WorkDir == "" {
+		r.Ctx.DockerBuildCtx.WorkDir = "."
+	}
 	cmds = append(
 		cmds,
 		dockerBuildCmd(
@@ -335,7 +338,7 @@ func (r *Reaper) runDockerBuild() error {
 		r.setProxy(r.Ctx.DockerBuildCtx, r.Ctx.Proxy)
 	}
 
-	log.Info("Runing Docker Build.")
+	log.Info("Running Docker Build.")
 	startTimeDockerBuild := time.Now()
 	envs := r.getUserEnvs()
 	for _, c := range r.dockerCommands() {
@@ -400,7 +403,7 @@ func (r *Reaper) Exec() (err error) {
 	}
 	log.Infof("Execution ended. Duration: %.2f seconds.", time.Since(startTimeRunBuildScript).Seconds())
 
-	if r.Ctx.ScannerFlag && r.Ctx.ScannerType == types.ScanningTypeSonar {
+	if r.Ctx.ScannerFlag && r.Ctx.ScannerType == types.ScanningTypeSonar && r.Ctx.SonarEnableScanner {
 		// for sonar type we write the sonar parameter into config file and go with sonar-scanner command
 		log.Info("Executing SonarQube Scanning process.")
 		startTimeRunSonar := time.Now()
@@ -615,14 +618,13 @@ func (r *Reaper) maskSecretEnvs(message string) string {
 }
 
 func (r *Reaper) getUserEnvs() []string {
-	envs := []string{
-		"CI=true",
-		"ZADIG=true",
+	envs := os.Environ()
+	envs = append(envs,
 		fmt.Sprintf("HOME=%s", config.Home()),
 		fmt.Sprintf("WORKSPACE=%s", r.ActiveWorkspace),
 		// TODO: readme文件可以使用别的方式代替
 		fmt.Sprintf("README=%s", ReadmeFile),
-	}
+	)
 
 	r.Ctx.Paths = strings.Replace(r.Ctx.Paths, "$HOME", config.Home(), -1)
 	envs = append(envs, fmt.Sprintf("PATH=%s", r.Ctx.Paths))

@@ -20,19 +20,22 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb/template"
 
 	"go.uber.org/zap"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/kube"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/system/repository/models"
-	systemmongodb "github.com/koderover/zadig/pkg/microservice/aslan/core/system/repository/mongodb"
-	"github.com/koderover/zadig/pkg/setting"
-	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
-	"github.com/koderover/zadig/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/kube"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/system/repository/models"
+	systemmongodb "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/system/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	kubeclient "github.com/koderover/zadig/v2/pkg/shared/kube/client"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
 )
 
 type OfflineServiceJobCtl struct {
@@ -85,7 +88,15 @@ func (c *OfflineServiceJobCtl) Run(ctx context.Context) {
 
 	c.logger = c.logger.With("func", "OfflineServiceJobCtl")
 
+	projectInfo, err := template.NewProductColl().Find(c.workflowCtx.ProjectName)
+	if err != nil {
+		c.job.Error = fmt.Sprintf("failed to fetch project info: %v", err)
+		c.job.Status = config.StatusFailed
+		return
+	}
+
 	var fail bool
+	serviceNames := make([]string, 0)
 	for _, event := range c.jobTaskSpec.ServiceEvents {
 		logger := c.logger.With("service", event.ServiceName)
 
@@ -108,38 +119,44 @@ func (c *OfflineServiceJobCtl) Run(ctx context.Context) {
 			})
 		}
 
-		yaml, _, err := kube.FetchCurrentAppliedYaml(&kube.GeneSvcYamlOption{
-			ProductName: c.workflowCtx.ProjectName,
-			EnvName:     c.jobTaskSpec.EnvName,
-			ServiceName: event.ServiceName,
-			UnInstall:   true,
-		})
-		if err != nil {
-			errHandler(fmt.Sprintf("fetch current applied yaml error: %v", err))
+		if projectInfo.IsHelmProduct() {
+			serviceNames = append(serviceNames, event.ServiceName)
 			continue
-		}
+		} else {
+			yaml, _, err := kube.FetchCurrentAppliedYaml(&kube.GeneSvcYamlOption{
+				ProductName: c.workflowCtx.ProjectName,
+				EnvName:     c.jobTaskSpec.EnvName,
+				ServiceName: event.ServiceName,
+				UnInstall:   true,
+			})
+			if err != nil {
+				errHandler(fmt.Sprintf("fetch current applied yaml error: %v", err))
+				continue
+			}
 
-		err = UpdateProductServiceDeployInfo(&ProductServiceDeployInfo{
-			ProductName: c.workflowCtx.ProjectName,
-			EnvName:     c.jobTaskSpec.EnvName,
-			ServiceName: event.ServiceName,
-			Uninstall:   true,
-		})
-		if err != nil {
-			errHandler(fmt.Sprintf("update product service deploy info error: %v", err))
-			continue
-		}
+			err = UpdateProductServiceDeployInfo(&ProductServiceDeployInfo{
+				ProductName: c.workflowCtx.ProjectName,
+				EnvName:     c.jobTaskSpec.EnvName,
+				ServiceName: event.ServiceName,
+				Uninstall:   true,
+				UserName:    c.workflowCtx.WorkflowTaskCreatorUsername,
+			})
+			if err != nil {
+				errHandler(fmt.Sprintf("update product service deploy info error: %v", err))
+				continue
+			}
 
-		_, err = kube.CreateOrPatchResource(&kube.ResourceApplyParam{
-			ProductInfo:         env,
-			ServiceName:         event.ServiceName,
-			CurrentResourceYaml: yaml,
-			KubeClient:          kubeClient,
-			Uninstall:           true,
-		}, c.logger.With("caller", "OfflineServiceJobCtl.Run"))
-		if err != nil {
-			errHandler(fmt.Sprintf("create or patch resource error: %v", err))
-			continue
+			_, err = kube.CreateOrPatchResource(&kube.ResourceApplyParam{
+				ProductInfo:         env,
+				ServiceName:         event.ServiceName,
+				CurrentResourceYaml: yaml,
+				KubeClient:          kubeClient,
+				Uninstall:           true,
+			}, c.logger.With("caller", "OfflineServiceJobCtl.Run"))
+			if err != nil {
+				errHandler(fmt.Sprintf("create or patch resource error: %v", err))
+				continue
+			}
 		}
 
 		event.Status = config.StatusPassed
@@ -151,6 +168,40 @@ func (c *OfflineServiceJobCtl) Run(ctx context.Context) {
 			Scene:       setting.OperationSceneEnv,
 			Targets:     []string{c.jobTaskSpec.EnvName},
 			Name:        fmt.Sprintf("%s:[%s]", c.jobTaskSpec.EnvName, event.ServiceName),
+			RequestBody: "",
+			Status:      http.StatusOK,
+			CreatedAt:   time.Now().Unix(),
+		})
+	}
+
+	if projectInfo.IsHelmProduct() {
+		err = kube.RemoveHelmResource(&kube.ResourceApplyParam{
+			ProductInfo: env,
+			ServiceList: serviceNames,
+			KubeClient:  kubeClient,
+			Uninstall:   true,
+		}, c.logger.With("caller", "OfflineServiceJobCtl.Run"))
+		if err != nil {
+
+			for _, event := range c.jobTaskSpec.ServiceEvents {
+				event.Status = config.StatusFailed
+			}
+
+			c.job.Error = fmt.Sprintf("failed to offline services: %v", err)
+			c.job.Status = config.StatusFailed
+			return
+		}
+		for _, event := range c.jobTaskSpec.ServiceEvents {
+			event.Status = config.StatusPassed
+		}
+		_ = systemmongodb.NewOperationLogColl().Insert(&models.OperationLog{
+			Username:    c.workflowCtx.WorkflowTaskCreatorUsername,
+			ProductName: c.workflowCtx.ProjectName,
+			Method:      "下线",
+			Function:    "环境的服务",
+			Scene:       setting.OperationSceneEnv,
+			Targets:     []string{c.jobTaskSpec.EnvName},
+			Name:        fmt.Sprintf("%s:[%s]", c.jobTaskSpec.EnvName, strings.Join(serviceNames, ",")),
 			RequestBody: "",
 			Status:      http.StatusOK,
 			CreatedAt:   time.Now().Unix(),

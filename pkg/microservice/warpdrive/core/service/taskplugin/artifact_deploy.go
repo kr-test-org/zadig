@@ -31,13 +31,14 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	zadigconfig "github.com/koderover/zadig/pkg/config"
-	"github.com/koderover/zadig/pkg/microservice/warpdrive/config"
-	"github.com/koderover/zadig/pkg/microservice/warpdrive/core/service/types/task"
-	"github.com/koderover/zadig/pkg/setting"
-	krkubeclient "github.com/koderover/zadig/pkg/tool/kube/client"
-	"github.com/koderover/zadig/pkg/tool/kube/label"
-	"github.com/koderover/zadig/pkg/tool/kube/updater"
+	zadigconfig "github.com/koderover/zadig/v2/pkg/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/warpdrive/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/warpdrive/core/service/types/task"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	krkubeclient "github.com/koderover/zadig/v2/pkg/tool/kube/client"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/label"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/updater"
+	"github.com/pkg/errors"
 )
 
 const (
@@ -134,6 +135,25 @@ func (p *ArtifactDeployTaskPlugin) Run(ctx context.Context, pipelineTask *task.T
 		p.restConfig = restConfig
 	}
 
+	productInfo, err := GetProductInfo(ctx, &EnvArgs{EnvName: p.Task.EnvName, ProductName: p.Task.ProductName})
+	if err != nil {
+		err = errors.WithMessagef(
+			err,
+			"failed to get product %s/%s",
+			p.Task.Namespace, p.Task.ServiceName)
+		p.Log.Error(err)
+		p.Task.TaskStatus = config.StatusFailed
+		p.Task.Error = err.Error()
+		return
+	}
+	if productInfo.IsSleeping() {
+		err = fmt.Errorf("product %s/%s is sleeping", p.Task.ProductName, p.Task.EnvName)
+		p.Log.Error(err)
+		p.Task.TaskStatus = config.StatusFailed
+		p.Task.Error = err.Error()
+		return
+	}
+
 	envName := pipelineTask.WorkflowArgs.Namespace
 	envNameVar := &task.KeyVal{Key: "ENV_NAME", Value: envName, IsCredential: false}
 	p.Task.JobCtx.EnvVars = append(p.Task.JobCtx.EnvVars, envNameVar)
@@ -175,7 +195,7 @@ func (p *ArtifactDeployTaskPlugin) Run(ctx context.Context, pipelineTask *task.T
 	p.KubeNamespace = pipelineTask.ConfigPayload.Build.KubeNamespace
 
 	//instantiates variables like ${<REPO>_BRANCH} ${${REPO_index}_BRANCH} ..
-	p.Task.JobCtx.EnvVars = append(p.Task.JobCtx.EnvVars, InstantiateBuildSysVariables(&p.Task.JobCtx)...)
+	p.Task.JobCtx.EnvVars = append(p.Task.JobCtx.EnvVars, CreateEnvsFromRepoInfo(p.Task.JobCtx.Builds)...)
 
 	jobCtx := JobCtxBuilder{
 		JobName:     p.JobName,
@@ -234,7 +254,7 @@ func (p *ArtifactDeployTaskPlugin) Run(ctx context.Context, pipelineTask *task.T
 	p.Task.Registries = getMatchedRegistries(jobImage, p.Task.Registries)
 
 	//Resource request default value is LOW
-	job, err := buildJob(p.Type(), jobImage, p.JobName, serviceName, "", pipelineTask.ConfigPayload.Build.KubeNamespace, p.Task.ResReq, p.Task.ResReqSpec, pipelineCtx, pipelineTask, p.Task.Registries)
+	job, err := buildJob(p.Type(), jobImage, p.JobName, serviceName, "", "", pipelineTask.ConfigPayload.Build.KubeNamespace, p.Task.ResReq, p.Task.ResReqSpec, pipelineCtx, pipelineTask, p.Task.Registries)
 	if err != nil {
 		msg := fmt.Sprintf("create build job context error: %v", err)
 		p.Log.Error(msg)

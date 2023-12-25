@@ -17,15 +17,16 @@ limitations under the License.
 package collaboration
 
 import (
+	"github.com/koderover/zadig/v2/pkg/types"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/collaboration/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/collaboration/repository/mongodb"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/label/config"
-	"github.com/koderover/zadig/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/collaboration/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/collaboration/repository/mongodb"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/label/config"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
 )
 
 type GetCollaborationModeResp struct {
@@ -105,6 +106,8 @@ func GetCollaborationModes(projects []string, logger *zap.SugaredLogger) (*GetCo
 	}
 	for _, mode := range collaborations {
 		setCollaborationModesWorkflowDisplayName(mode)
+		// some compatibility for 1.7 update, the whole logic and field changed from member -> member_info
+		setMemberInfo(mode)
 	}
 	return &GetCollaborationModeResp{
 		Collaborations: collaborations,
@@ -148,4 +151,19 @@ func setCollaborationModesWorkflowDisplayName(mode *models.CollaborationMode) {
 		}
 		mode.Workflows[i].DisplayName = namesMap[workflow.Name]
 	}
+}
+
+func setMemberInfo(mode *models.CollaborationMode) {
+	if mode.MemberInfo != nil && len(mode.MemberInfo) > 0 {
+		return
+	}
+
+	memberList := make([]*types.Identity, 0)
+	for _, uid := range mode.Members {
+		memberList = append(memberList, &types.Identity{
+			IdentityType: "user",
+			UID:          uid,
+		})
+	}
+	mode.MemberInfo = memberList
 }

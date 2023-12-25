@@ -22,10 +22,10 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/tool/jira"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/tool/jira"
 )
 
 type JiraJobCtl struct {
@@ -57,7 +57,7 @@ func (c *JiraJobCtl) Run(ctx context.Context) {
 	c.job.Status = config.StatusRunning
 	c.ack()
 
-	info, err := mongodb.NewProjectManagementColl().GetJira()
+	info, err := mongodb.NewProjectManagementColl().GetJiraByID(c.jobTaskSpec.JiraID)
 	if err != nil {
 		logError(c.job, err.Error(), c.logger)
 		return
@@ -68,8 +68,6 @@ func (c *JiraJobCtl) Run(ctx context.Context) {
 	}
 	client := jira.NewJiraClientWithAuthType(info.JiraHost, info.JiraUser, info.JiraToken, info.JiraPersonalAccessToken, info.JiraAuthType)
 	for _, issue := range c.jobTaskSpec.Issues {
-		issue.Link = fmt.Sprintf("%s/browse/%s", info.JiraHost, issue.Key)
-
 		list, err := client.Issue.GetTransitions(issue.Key)
 		if err != nil {
 			logError(c.job, fmt.Sprintf("GetTransitions issue %s error: %v", issue.Key, err), c.logger)

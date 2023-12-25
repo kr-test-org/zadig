@@ -29,12 +29,12 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	configbase "github.com/koderover/zadig/pkg/config"
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/types"
-	"github.com/koderover/zadig/pkg/types/step"
+	configbase "github.com/koderover/zadig/v2/pkg/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/types/step"
 )
 
 func (w *Service) SendWorkflowTaskAproveNotifications(workflowName string, taskID int64) error {
@@ -225,12 +225,18 @@ func (w *Service) getNotificationContent(notify *models.NotifyCtl, task *models.
 							prLinkBuilder = func(baseURL, owner, repoName string, prID int) string {
 								return fmt.Sprintf("%s/%d", baseURL, prID)
 							}
+						default:
+							prLinkBuilder = func(baseURL, owner, repoName string, prID int) string {
+								return ""
+							}
 						}
 						prInfoList = []string{}
 						sort.Ints(buildRepo.PRs)
 						for _, id := range buildRepo.PRs {
 							link := prLinkBuilder(buildRepo.Address, buildRepo.RepoOwner, buildRepo.RepoName, id)
-							prInfoList = append(prInfoList, fmt.Sprintf("[#%d](%s)", id, link))
+							if link != "" {
+								prInfoList = append(prInfoList, fmt.Sprintf("[#%d](%s)", id, link))
+							}
 						}
 						commitMsg := strings.Trim(buildRepo.CommitMessage, "\n")
 						commitMsgs = strings.Split(commitMsg, "\n")

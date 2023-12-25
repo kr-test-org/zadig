@@ -22,7 +22,7 @@ import (
 
 	"github.com/spf13/viper"
 
-	"github.com/koderover/zadig/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/setting"
 )
 
 // SystemAddress is the fully qualified domain name of the system, or an IP Address.
@@ -30,10 +30,6 @@ import (
 // for example: foo.bar.com, https://for.bar.com, http://1.2.3.4:5678
 func SystemAddress() string {
 	return viper.GetString(setting.ENVSystemAddress)
-}
-
-func Enterprise() bool {
-	return viper.GetBool(setting.ENVEnterprise)
 }
 
 func Mode() string {
@@ -81,6 +77,10 @@ func AslanServiceInfo() *setting.ServiceInfo {
 	return GetServiceByCode(setting.Aslan)
 }
 
+func UserServiceInfo() *setting.ServiceInfo {
+	return GetServiceByCode(setting.User)
+}
+
 func SecretKey() string {
 	return viper.GetString(setting.ENVSecretKey)
 }
@@ -90,12 +90,9 @@ func AslanServiceAddress() string {
 	return GetServiceAddress(s.Name, s.Port)
 }
 
-func AslanServiceName() string {
-	return AslanServiceInfo().Name
-}
-
-func AslanServicePort() int32 {
-	return AslanServiceInfo().Port
+func UserServiceAddress() string {
+	s := UserServiceInfo()
+	return GetServiceAddress(s.Name, s.Port)
 }
 
 func AslanxServiceInfo() *setting.ServiceInfo {
@@ -105,14 +102,6 @@ func AslanxServiceInfo() *setting.ServiceInfo {
 func AslanxServiceAddress() string {
 	s := AslanxServiceInfo()
 	return GetServiceAddress(s.Name, s.Port)
-}
-
-func AslanxServiceName() string {
-	return AslanxServiceInfo().Name
-}
-
-func AslanxServicePort() int32 {
-	return AslanxServiceInfo().Port
 }
 
 func HubServerServiceInfo() *setting.ServiceInfo {
@@ -191,6 +180,10 @@ func ObjectStorageServicePath(project, service string) string {
 	return filepath.Join(project, "service", service)
 }
 
+func ObjectStorageProductionServicePath(project, service string) string {
+	return filepath.Join(project, "production-service", service)
+}
+
 func ObjectStorageTemplatePath(name, kind string) string {
 	return filepath.Join("templates", kind, name)
 }
@@ -203,16 +196,22 @@ func ObjectStorageChartTemplatePath(name string) string {
 	return ObjectStorageTemplatePath(name, setting.ChartTemplatesPath)
 }
 
-func LocalServicePath(project, service string) string {
-	return filepath.Join(DataPath(), project, service)
+func LocalTestServicePath(project, service string) string {
+	return filepath.Join(DataPath(), project, "test", service)
 }
 
 func LocalWorkflowServicePath(project, service string) string {
 	return filepath.Join(WorkflowDataPath(), project, service)
 }
 
-func LocalServicePathWithRevision(project, service, revision string) string {
-	return filepath.Join(DataPath(), project, service, revision)
+// LocalTestServicePathWithRevision returns a test service path with a given revision.
+func LocalTestServicePathWithRevision(project, service, revision string) string {
+	return filepath.Join(DataPath(), project, "test", service, revision)
+}
+
+// LocalProductionServicePathWithRevision returns a production service path with a given revision.
+func LocalProductionServicePathWithRevision(project, service, revision string) string {
+	return filepath.Join(DataPath(), project, "production", service, revision)
 }
 
 func LocalTemplatePath(name, kind string) string {
@@ -249,14 +248,6 @@ func MysqlPassword() string {
 
 func MysqlHost() string {
 	return viper.GetString(setting.ENVMysqlHost)
-}
-
-func AdminEmail() string {
-	return viper.GetString(setting.ENVAdminEmail)
-}
-
-func AdminPassword() string {
-	return viper.GetString(setting.ENVAdminPassword)
 }
 
 func Namespace() string {

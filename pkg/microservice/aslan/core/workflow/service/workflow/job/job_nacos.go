@@ -21,16 +21,18 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/util"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/types"
 )
 
 type NacosJob struct {
@@ -41,7 +43,7 @@ type NacosJob struct {
 
 func (j *NacosJob) Instantiate() error {
 	j.spec = &commonmodels.NacosJobSpec{}
-	if err := commonmodels.IToiYaml(j.job.Spec, j.spec); err != nil {
+	if err := commonmodels.IToi(j.job.Spec, j.spec); err != nil {
 		return err
 	}
 	j.job.Spec = j.spec
@@ -62,8 +64,24 @@ func (j *NacosJob) SetPreset() error {
 		return fmt.Errorf("fail to list nacos config: %w", err)
 	}
 
+	namespaces, err := commonservice.ListNacosNamespace(j.spec.NacosID, log.SugaredLogger())
+	if err != nil {
+		return fmt.Errorf("failed to list nacos namespace")
+	}
+
+	namespaceName := ""
+	for _, namespace := range namespaces {
+		if namespace.NamespaceID == originNamespaceID {
+			namespaceName = namespace.NamespacedName
+			break
+		}
+	}
+
 	nacosConfigsMap := map[string]*types.NacosConfig{}
 	for _, config := range nacosConfigs {
+		config.NamespaceID = originNamespaceID
+		config.NamespaceName = namespaceName
+
 		nacosConfigsMap[getNacosConfigKey(config.Group, config.DataID)] = config
 	}
 
@@ -170,8 +188,12 @@ func (j *NacosJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 }
 
 func (j *NacosJob) LintJob() error {
+	if err := util.CheckZadigXLicenseStatus(); err != nil {
+		return e.ErrLicenseInvalid.AddDesc("")
+	}
+
 	j.spec = &commonmodels.NacosJobSpec{}
-	if err := commonmodels.IToiYaml(j.job.Spec, j.spec); err != nil {
+	if err := commonmodels.IToi(j.job.Spec, j.spec); err != nil {
 		return err
 	}
 

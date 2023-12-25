@@ -25,57 +25,196 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/koderover/zadig/v2/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	svcservice "github.com/koderover/zadig/pkg/microservice/aslan/core/service/service"
-	"github.com/koderover/zadig/pkg/setting"
-	internalhandler "github.com/koderover/zadig/pkg/shared/handler"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	"github.com/koderover/zadig/pkg/tool/log"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	commontypes "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/types"
+	svcservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/service/service"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	internalhandler "github.com/koderover/zadig/v2/pkg/shared/handler"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
 )
 
 func ListServiceTemplate(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
-	ctx.Resp, ctx.Err = commonservice.ListServiceTemplate(c.Query("projectName"), ctx.Logger)
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
+
+	projectName := c.Query("projectName")
+
+	// authorization check
+	// either they have the authorization, or they are system admins/project admins.
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[projectName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+		if !ctx.Resources.ProjectAuthInfo[projectName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[projectName].Service.View {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
+
+	ctx.Resp, ctx.Err = commonservice.ListServiceTemplate(projectName, ctx.Logger)
 }
 
 func ListWorkloadTemplate(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
-	ctx.Resp, ctx.Err = commonservice.ListWorkloadTemplate(c.Query("projectName"), c.Query("env"), ctx.Logger)
+
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
+
+	projectName := c.Query("projectName")
+
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[projectName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+		if !ctx.Resources.ProjectAuthInfo[projectName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[projectName].Env.View {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
+
+	// anyone with a token should be able to use this API
+	ctx.Resp, ctx.Err = commonservice.ListWorkloadTemplate(projectName, c.Query("env"), ctx.Logger)
 }
 
 func GetServiceTemplate(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
+
+	projectName := c.Query("projectName")
+
+	// authorization check
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[projectName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+		if !ctx.Resources.ProjectAuthInfo[projectName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[projectName].Service.View {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
+
 	revision, err := strconv.ParseInt(c.DefaultQuery("revision", "0"), 10, 64)
 	if err != nil {
 		ctx.Err = e.ErrInvalidParam.AddDesc("invalid revision number")
 		return
 	}
-	ctx.Resp, ctx.Err = commonservice.GetServiceTemplate(c.Param("name"), c.Param("type"), c.Query("projectName"), setting.ProductStatusDeleting, revision, ctx.Logger)
+	ctx.Resp, ctx.Err = commonservice.GetServiceTemplateWithStructure(c.Param("name"), c.Param("type"), projectName, setting.ProductStatusDeleting, revision, ctx.Logger)
 }
 
 func GetServiceTemplateOption(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	projectName := c.Query("projectName")
+
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
+
+	// TODO: Authorization leak
+	// this API is sometimes used in edit/create workflow scenario, thus giving the edit/create workflow permission
+	// authorization check
+	permitted := false
+
+	if ctx.Resources.IsSystemAdmin {
+		permitted = true
+	} else if projectAuthInfo, ok := ctx.Resources.ProjectAuthInfo[projectName]; ok {
+		// first check if the user is projectAdmin
+		if projectAuthInfo.IsProjectAdmin {
+			permitted = true
+		}
+
+		// then check if user has edit workflow permission
+		if projectAuthInfo.Env.EditConfig ||
+			projectAuthInfo.Service.View {
+			permitted = true
+		}
+
+		// finally check if the permission is given by collaboration mode
+		collaborationAuthorizedEdit, err := internalhandler.CheckPermissionGivenByCollaborationMode(ctx.UserID, projectName, types.ResourceTypeEnvironment, types.EnvActionEditConfig)
+		if err == nil && collaborationAuthorizedEdit {
+			permitted = true
+		}
+	}
+
+	if !permitted {
+		ctx.UnAuthorized = true
+		return
+	}
+
 	revision, err := strconv.ParseInt(c.DefaultQuery("revision", "0"), 10, 64)
 	if err != nil {
 		ctx.Err = e.ErrInvalidParam.AddDesc("invalid revision number")
 		return
 	}
-	ctx.Resp, ctx.Err = svcservice.GetServiceTemplateOption(c.Param("name"), c.Query("projectName"), revision, ctx.Logger)
+	ctx.Resp, ctx.Err = svcservice.GetServiceTemplateOption(c.Param("name"), projectName, revision, ctx.Logger)
 }
 
+type createServiceTemplateRequest struct {
+	ProductName        string                           `json:"product_name" binding:"required"`
+	ServiceName        string                           `json:"service_name" binding:"required"`
+	Source             string                           `json:"source" binding:"required"`
+	Type               string                           `json:"type" binding:"required"`
+	Visibility         string                           `json:"visibility" binding:"required"`
+	Yaml               string                           `json:"yaml" binding:"required"`
+	VariableYaml       string                           `json:"variable_yaml"`
+	ServiceVariableKVs []*commontypes.ServiceVariableKV `json:"service_variable_kvs"`
+}
+
+// @Summary Create service template
+// @Description Create service template
+// @Tags 	service
+// @Accept 	json
+// @Produce json
+// @Param 	force	query		bool							true	"is force to create service template"
+// @Param 	body 	body 		createServiceTemplateRequest 	true 	"body"
+// @Success 200 	{object} 	svcservice.ServiceOption
+// @Router /api/aslan/service/services [post]
 func CreateServiceTemplate(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
-	args := new(commonmodels.Service)
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
+
+	args := new(createServiceTemplateRequest)
 	data, err := c.GetRawData()
 	if err != nil {
 		log.Errorf("CreateServiceTemplate c.GetRawData() err : %v", err)
@@ -83,8 +222,26 @@ func CreateServiceTemplate(c *gin.Context) {
 	if err = json.Unmarshal(data, args); err != nil {
 		log.Errorf("CreateServiceTemplate json.Unmarshal err : %v", err)
 	}
+	// insert operation logs
 	internalhandler.InsertOperationLog(c, ctx.UserName, args.ProductName, "新增", "项目管理-服务", fmt.Sprintf("服务名称:%s", args.ServiceName), string(data), ctx.Logger)
 	c.Request.Body = io.NopCloser(bytes.NewBuffer(data))
+
+	// authorization checks
+	projectName := args.ProductName
+
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[projectName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+		// TODO: Authorization leak
+		if !ctx.Resources.ProjectAuthInfo[projectName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[projectName].Service.Create &&
+			!ctx.Resources.ProjectAuthInfo[projectName].Service.Edit {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
 
 	if err := c.BindJSON(args); err != nil {
 		ctx.Err = e.ErrInvalidParam.AddDesc("invalid ServiceTmpl json args")
@@ -97,53 +254,148 @@ func CreateServiceTemplate(c *gin.Context) {
 		return
 	}
 
-	args.CreateBy = ctx.UserName
+	svc := new(commonmodels.Service)
+	svc.CreateBy = ctx.UserName
+	svc.ProductName = args.ProductName
+	svc.ServiceName = args.ServiceName
+	svc.Source = args.Source
+	svc.Type = args.Type
+	svc.VariableYaml = args.VariableYaml
+	svc.ServiceVariableKVs = args.ServiceVariableKVs
+	svc.Yaml = args.Yaml
 
-	ctx.Resp, ctx.Err = svcservice.CreateServiceTemplate(ctx.UserName, args, force, ctx.Logger)
+	ctx.Resp, ctx.Err = svcservice.CreateServiceTemplate(ctx.UserName, svc, force, ctx.Logger)
 }
 
 // UpdateServiceTemplate TODO figure out in which scene this function will be used
-func UpdateServiceTemplate(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
-	defer func() { internalhandler.JSONResponse(c, ctx) }()
+//func UpdateServiceTemplate(c *gin.Context) {
+//	ctx, err := internalhandler.NewContextWithAuthorization(c)
+//	defer func() { internalhandler.JSONResponse(c, ctx) }()
+//
+//	if err != nil {
+//
+//		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+//		ctx.UnAuthorized = true
+//		return
+//	}
+//
+//	args := new(commonservice.ServiceTmplObject)
+//	if err := c.ShouldBindJSON(args); err != nil {
+//		ctx.Err = err
+//		return
+//	}
+//	if args.Username != "system" {
+//		internalhandler.InsertOperationLog(c, ctx.UserName, args.ProductName, "更新", "项目管理-服务", fmt.Sprintf("服务名称:%s,版本号:%d", args.ServiceName, args.Revision), "", ctx.Logger)
+//	}
+//
+//	// authorization checks
+//	projectName := args.ProductName
+//
+//	if !ctx.Resources.IsSystemAdmin {
+//		if _, ok := ctx.Resources.ProjectAuthInfo[projectName]; !ok {
+//			ctx.UnAuthorized = true
+//			return
+//		}
+//		if !ctx.Resources.ProjectAuthInfo[projectName].IsProjectAdmin &&
+//			!ctx.Resources.ProjectAuthInfo[projectName].Service.Edit {
+//			ctx.UnAuthorized = true
+//			return
+//		}
+//	}
+//
+//	args.Username = ctx.UserName
+//	ctx.Err = svcservice.UpdateServiceVisibility(args)
+//}
 
-	args := new(commonservice.ServiceTmplObject)
-	if err := c.ShouldBindJSON(args); err != nil {
-		ctx.Err = err
-		return
-	}
-	if args.Username != "system" {
-		internalhandler.InsertOperationLog(c, ctx.UserName, args.ProductName, "更新", "项目管理-服务", fmt.Sprintf("服务名称:%s,版本号:%d", args.ServiceName, args.Revision), "", ctx.Logger)
-	}
-	args.Username = ctx.UserName
-	ctx.Err = svcservice.UpdateServiceVisibility(args)
+type updateServiceVariableRequest struct {
+	VariableYaml       string                           `json:"variable_yaml" binding:"required"`
+	ServiceVariableKVs []*commontypes.ServiceVariableKV `json:"service_variable_kvs" binding:"required"`
 }
 
+// @Summary Update service varaible
+// @Description Update service varaible
+// @Tags 	service
+// @Accept 	json
+// @Produce json
+// @Param 	name		path		string							true	"service name"
+// @Param 	projectName	query		string							true	"project name"
+// @Param 	body  		body 		updateServiceVariableRequest 	true 	"body"
+// @Success 200
+// @Router /api/aslan/service/services/{name}/variable [put]
 func UpdateServiceVariable(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
-	args := new(commonservice.ServiceTmplObject)
-	if err := c.ShouldBindJSON(args); err != nil {
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
+
+	req := new(updateServiceVariableRequest)
+	servceTmplObjectargs := new(commonservice.ServiceTmplObject)
+	if err := c.ShouldBindJSON(req); err != nil {
 		ctx.Err = err
 		return
 	}
-	args.ProductName = c.Query("projectName")
-	args.ServiceName = c.Param("name")
-	args.Username = ctx.UserName
-	internalhandler.InsertOperationLog(c, ctx.UserName, args.ProductName, "更新", "项目管理-服务变量", fmt.Sprintf("服务名称:%s", args.ServiceName), "", ctx.Logger)
-	ctx.Err = svcservice.UpdateServiceVariables(args)
+
+	// authorization
+	projectName := c.Query("projectName")
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[projectName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+		if !ctx.Resources.ProjectAuthInfo[projectName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[projectName].Service.Edit {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
+
+	servceTmplObjectargs.ProductName = c.Query("projectName")
+	servceTmplObjectargs.ServiceName = c.Param("name")
+	servceTmplObjectargs.Username = ctx.UserName
+	servceTmplObjectargs.VariableYaml = req.VariableYaml
+	servceTmplObjectargs.ServiceVariableKVs = req.ServiceVariableKVs
+
+	internalhandler.InsertOperationLog(c, ctx.UserName, servceTmplObjectargs.ProductName, "更新", "项目管理-服务变量", fmt.Sprintf("服务名称:%s", servceTmplObjectargs.ServiceName), "", ctx.Logger)
+
+	ctx.Err = svcservice.UpdateServiceVariables(servceTmplObjectargs)
 }
 
 func UpdateServiceHealthCheckStatus(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
 
 	args := new(commonservice.ServiceTmplObject)
 	if err := c.ShouldBindJSON(args); err != nil {
 		ctx.Err = err
 		return
 	}
+
+	// authorization
+	projectName := args.ProductName
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[projectName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+		if !ctx.Resources.ProjectAuthInfo[projectName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[projectName].Env.EditConfig {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
+
 	if args.Username != "system" {
 		internalhandler.InsertOperationLog(c, ctx.UserName, args.ProductName, "更新", "项目管理-服务", fmt.Sprintf("服务名称:%s,版本号:%d", args.ServiceName, args.Revision), "", ctx.Logger)
 	}
@@ -172,29 +424,32 @@ func YamlValidator(c *gin.Context) {
 	ctx.Resp = resp
 }
 
-func YamlViewServiceTemplate(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
-	defer func() { internalhandler.JSONResponse(c, ctx) }()
-
-	args := new(svcservice.YamlViewServiceTemplateReq)
-	if err := c.BindJSON(args); err != nil {
-		ctx.Err = e.ErrInvalidParam.AddDesc("invalid yaml args")
-		return
-	}
-	args.ProjectName = c.Query("projectName")
-	args.ServiceName = c.Param("name")
-	if args.ProjectName == "" || args.ServiceName == "" {
-		ctx.Err = e.ErrInvalidParam.AddDesc("projectName or serviceName can't be nil")
-		return
-	}
-	ctx.Resp, ctx.Err = svcservice.YamlViewServiceTemplate(args)
-}
-
 func HelmReleaseNaming(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
 
 	projectName := c.Query("projectName")
+
+	// authorization checks
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[projectName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+		if !ctx.Resources.ProjectAuthInfo[projectName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[projectName].Service.Edit {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
+
 	if projectName == "" {
 		ctx.Err = e.ErrInvalidParam.AddDesc("projectName can't be nil")
 		return
@@ -213,12 +468,34 @@ func HelmReleaseNaming(c *gin.Context) {
 }
 
 func DeleteServiceTemplate(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
+
+	projectName := c.Query("projectName")
+
+	// authorization checks
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[projectName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+		if !ctx.Resources.ProjectAuthInfo[projectName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[projectName].Service.Delete {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
 
 	internalhandler.InsertOperationLog(c, ctx.UserName, c.Query("projectName"), "删除", "项目管理-服务", c.Param("name"), "", ctx.Logger)
 
-	ctx.Err = svcservice.DeleteServiceTemplate(c.Param("name"), c.Param("type"), c.Query("projectName"), c.DefaultQuery("isEnvTemplate", "true"), c.DefaultQuery("visibility", "public"), ctx.Logger)
+	ctx.Err = svcservice.DeleteServiceTemplate(c.Param("name"), c.Param("type"), projectName, c.DefaultQuery("isEnvTemplate", "true"), c.DefaultQuery("visibility", "public"), ctx.Logger)
 }
 
 func ListServicePort(c *gin.Context) {
@@ -233,9 +510,16 @@ func ListServicePort(c *gin.Context) {
 }
 
 func UpdateWorkloads(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 	args := new(svcservice.UpdateWorkloadsArgs)
+
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
 
 	data, err := c.GetRawData()
 	if err != nil {
@@ -253,9 +537,23 @@ func UpdateWorkloads(c *gin.Context) {
 		ctx.Err = e.ErrInvalidParam.AddDesc("invalid UpdateWorkloadsArgs")
 		return
 	}
-	product := c.Query("projectName")
+	projectName := c.Query("projectName")
+
+	// authorization checks
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[projectName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+		if !ctx.Resources.ProjectAuthInfo[projectName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[projectName].Env.EditConfig {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
+
 	env := c.Query("env")
-	if product == "" || env == "" {
+	if projectName == "" || env == "" {
 		ctx.Err = e.ErrInvalidParam
 		return
 	}
@@ -268,12 +566,20 @@ func UpdateWorkloads(c *gin.Context) {
 		}
 	}
 
-	ctx.Err = svcservice.UpdateWorkloads(c, ctx.RequestID, ctx.UserName, product, env, *args, ctx.Logger)
+	ctx.Err = svcservice.UpdateWorkloads(c, ctx.RequestID, ctx.UserName, projectName, env, *args, ctx.Logger)
 }
 
 func CreateK8sWorkloads(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
+
 	args := new(svcservice.K8sWorkloadsArgs)
 
 	data, err := c.GetRawData()
@@ -284,8 +590,22 @@ func CreateK8sWorkloads(c *gin.Context) {
 		log.Errorf("CreateK8sWorkloads json.Unmarshal err : %v", err)
 	}
 
+	projectName := c.Query("projectName")
 	c.Request.Body = io.NopCloser(bytes.NewBuffer(data))
-	internalhandler.InsertDetailedOperationLog(c, ctx.UserName, c.Query("projectName"), setting.OperationSceneEnv, "新增", "环境", args.EnvName, string(data), ctx.Logger, args.EnvName)
+	internalhandler.InsertDetailedOperationLog(c, ctx.UserName, projectName, setting.OperationSceneEnv, "新增", "环境", args.EnvName, string(data), ctx.Logger, args.EnvName)
+
+	// authorization checks
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[projectName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+		if !ctx.Resources.ProjectAuthInfo[projectName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[projectName].Env.Create {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
 
 	err = c.BindJSON(args)
 	if err != nil {
@@ -294,13 +614,6 @@ func CreateK8sWorkloads(c *gin.Context) {
 	}
 
 	ctx.Err = svcservice.CreateK8sWorkLoads(c, ctx.RequestID, ctx.UserName, args, ctx.Logger)
-}
-
-func ListAvailablePublicServices(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
-	defer func() { internalhandler.JSONResponse(c, ctx) }()
-
-	ctx.Resp, ctx.Err = svcservice.ListAvailablePublicServices(c.Query("projectName"), ctx.Logger)
 }
 
 func GetServiceTemplateProductName(c *gin.Context) {
@@ -319,25 +632,19 @@ func GetServiceTemplateProductName(c *gin.Context) {
 	c.Next()
 }
 
-func GetServiceTemplateObjectProductName(c *gin.Context) {
-	args := new(commonservice.ServiceTmplObject)
-	data, err := c.GetRawData()
-	if err != nil {
-		log.Errorf("c.GetRawData() err : %v", err)
-		return
-	}
-	if err = json.Unmarshal(data, args); err != nil {
-		log.Errorf("json.Unmarshal err : %v", err)
-		return
-	}
-	c.Set("productName", args.ProductName)
-	c.Request.Body = io.NopCloser(bytes.NewBuffer(data))
-	c.Next()
-}
-
 func CreatePMService(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
+
+	projectName := c.Param("productName")
+
 	args := new(svcservice.ServiceTmplBuildObject)
 	data, err := c.GetRawData()
 	if err != nil {
@@ -346,8 +653,21 @@ func CreatePMService(c *gin.Context) {
 	if err = json.Unmarshal(data, args); err != nil {
 		log.Errorf("CreatePMService json.Unmarshal err : %v", err)
 	}
-	internalhandler.InsertOperationLog(c, ctx.UserName, c.Param("productName"), "新增", "项目管理-物理机部署服务", fmt.Sprintf("服务名称:%s,版本号:%d", args.ServiceTmplObject.ServiceName, args.ServiceTmplObject.Revision), string(data), ctx.Logger)
+	internalhandler.InsertOperationLog(c, ctx.UserName, projectName, "新增", "项目管理-物理机部署服务", fmt.Sprintf("服务名称:%s,版本号:%d", args.ServiceTmplObject.ServiceName, args.ServiceTmplObject.Revision), string(data), ctx.Logger)
 	c.Request.Body = io.NopCloser(bytes.NewBuffer(data))
+
+	// authorization checks
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[projectName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+		if !ctx.Resources.ProjectAuthInfo[projectName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[projectName].Service.Create {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
 
 	if err := c.BindJSON(args); err != nil {
 		ctx.Err = e.ErrInvalidParam.AddDesc("invalid service json args")
@@ -387,8 +707,17 @@ func CreatePMService(c *gin.Context) {
 }
 
 func UpdatePmServiceTemplate(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
+
+	projectName := c.Param("productName")
 
 	args := new(commonservice.ServiceTmplBuildObject)
 	data, err := c.GetRawData()
@@ -398,8 +727,21 @@ func UpdatePmServiceTemplate(c *gin.Context) {
 	if err = json.Unmarshal(data, args); err != nil {
 		log.Errorf("UpdatePmServiceTemplate json.Unmarshal err : %v", err)
 	}
-	internalhandler.InsertOperationLog(c, ctx.UserName, c.Param("productName"), "更新", "项目管理-主机服务", fmt.Sprintf("服务名称:%s,版本号:%d", args.ServiceTmplObject.ServiceName, args.ServiceTmplObject.Revision), "", ctx.Logger)
+	internalhandler.InsertOperationLog(c, ctx.UserName, projectName, "更新", "项目管理-主机服务", fmt.Sprintf("服务名称:%s,版本号:%d", args.ServiceTmplObject.ServiceName, args.ServiceTmplObject.Revision), "", ctx.Logger)
 	c.Request.Body = io.NopCloser(bytes.NewBuffer(data))
+
+	// authorization checks
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[projectName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+		if !ctx.Resources.ProjectAuthInfo[projectName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[projectName].Service.Edit {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
 
 	for _, heathCheck := range args.ServiceTmplObject.HealthChecks {
 		if heathCheck.TimeOut < 2 || heathCheck.TimeOut > 60 {
@@ -435,14 +777,14 @@ func UpdatePmServiceTemplate(c *gin.Context) {
 // @Produce json
 // @Param body body commonservice.ConvertVaraibleKVAndYamlArgs true "body"
 // @Success 200 {object} commonservice.ConvertVaraibleKVAndYamlArgs
-// @Router /service/services/variable/convert [post]
+// @Router /api/aslan/service/services/variable/convert [post]
 func ConvertVaraibleKVAndYaml(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
 	args := new(commonservice.ConvertVaraibleKVAndYamlArgs)
 	if err := c.ShouldBindJSON(args); err != nil {
-		ctx.Err = e.ErrInvalidParam.AddDesc("invalid ConvertVaraibleKVAndYamlArgs")
+		ctx.Err = e.ErrInvalidParam.AddDesc("invalid ConvertVariableKVAndYamlArgs")
 		return
 	}
 

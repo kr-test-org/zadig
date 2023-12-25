@@ -19,9 +19,9 @@ package task
 import (
 	"fmt"
 
-	"github.com/koderover/zadig/pkg/microservice/warpdrive/config"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/microservice/warpdrive/config"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/types"
 )
 
 type Build struct {
@@ -61,7 +61,7 @@ type Build struct {
 	EnvHostNames map[string][]string `bson:"env_host_names,omitempty"        json:"env_host_names,omitempty"`
 	ArtifactInfo *ArtifactInfo       `bson:"artifact_info,omitempty"         json:"artifact_info,omitempty"`
 	ClusterID    string              `bson:"cluster_id,omitempty"            json:"cluster_id,omitempty"`
-
+	StrategyID   string              `bson:"strategy_id"                     json:"strategy_id"`
 	// New since V1.10.0.
 	Cache        types.Cache        `bson:"cache"               json:"cache"`
 	CacheEnable  bool               `bson:"cache_enable"        json:"cache_enable"`
@@ -300,6 +300,7 @@ type Repository struct {
 	AuthType           types.AuthType `bson:"auth_type,omitempty"             json:"auth_type,omitempty"`
 	SSHKey             string         `bson:"ssh_key,omitempty"               json:"ssh_key,omitempty"`
 	PrivateAccessToken string         `bson:"private_access_token,omitempty"  json:"private_access_token,omitempty"`
+	SubmissionID       string         `bson:"submission_id,omitempty"         json:"submission_id,omitempty"`
 }
 
 type BuildStep struct {

@@ -19,8 +19,8 @@ package models
 import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/types"
 )
 
 type Testing struct {
@@ -76,6 +76,7 @@ type TestingHookCtrl struct {
 
 type TestingHook struct {
 	AutoCancel bool          `bson:"auto_cancel" json:"auto_cancel"`
+	IsManual   bool          `bson:"is_manual"   json:"is_manual"`
 	MainRepo   *MainHookRepo `bson:"main_repo"   json:"main_repo"`
 	TestArgs   *TestTaskArgs `bson:"test_args"   json:"test_args"`
 }
@@ -99,7 +100,7 @@ type PreTest struct {
 	// EnableProxy
 	EnableProxy bool   `bson:"enable_proxy"           json:"enable_proxy"`
 	ClusterID   string `bson:"cluster_id"             json:"cluster_id"`
-
+	StrategyID  string `bson:"strategy_id"            json:"strategy_id"`
 	// TODO: Deprecated.
 	Namespace string `bson:"namespace"              json:"namespace"`
 }

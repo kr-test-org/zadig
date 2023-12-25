@@ -56,7 +56,7 @@ func (*Router) Inject(router *gin.RouterGroup) {
 
 	registry := router.Group("registry")
 	{
-		registry.GET("", ListRegistries)
+		registry.GET("/project", ListRegistries)
 		// 获取默认的镜像仓库配置，用于kodespace CLI调用
 		registry.GET("/namespaces/default", GetDefaultRegistryNamespace)
 		registry.GET("/namespaces/specific/:id", GetRegistryNamespace)
@@ -78,6 +78,7 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		s3storage.PUT("/:id", UpdateS3Storage)
 		s3storage.DELETE("/:id", DeleteS3Storage)
 		s3storage.POST("/:id/releases/search", ListTars)
+		s3storage.GET("/project", ListS3StorageByProject)
 	}
 
 	//系统清理缓存
@@ -88,14 +89,11 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		cleanCache.POST("/cron", SetCron)
 	}
 
-	// ---------------------------------------------------------------------------------------
-	// Github管理接口
-	// ---------------------------------------------------------------------------------------
-	github := router.Group("githubApp")
+	// security and privacy settings
+	security := router.Group("security")
 	{
-		github.GET("", GetGithubApp)
-		github.POST("", CreateGithubApp)
-		github.DELETE("/:id", DeleteGithubApp)
+		security.POST("", CreateOrUpdateSecuritySettings)
+		security.GET("", GetSecuritySettings)
 	}
 
 	// ---------------------------------------------------------------------------------------
@@ -155,6 +153,7 @@ func (*Router) Inject(router *gin.RouterGroup) {
 	integration := router.Group("helm")
 	{
 		integration.GET("", ListHelmRepos)
+		integration.GET("project", ListHelmReposByProject)
 		integration.GET("/public", ListHelmReposPublic)
 		integration.POST("", CreateHelmRepo)
 		integration.PUT("/:id", UpdateHelmRepo)
@@ -222,6 +221,15 @@ func (*Router) Inject(router *gin.RouterGroup) {
 	}
 
 	// ---------------------------------------------------------------------------------------
+	// system custom theme
+	// ---------------------------------------------------------------------------------------
+	theme := router.Group("theme")
+	{
+		theme.GET("", GetThemeInfos)
+		theme.PUT("", UpdateThemeInfo)
+	}
+
+	// ---------------------------------------------------------------------------------------
 	// external system API
 	// ---------------------------------------------------------------------------------------
 	externalSystem := router.Group("external")
@@ -259,7 +267,12 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		configuration.POST("/validate", ValidateConfigurationManagement)
 		configuration.GET("/apollo/:id/app", ListApolloApps)
 		configuration.GET("/apollo/:id/:app_id/env", ListApolloEnvAndClusters)
+		configuration.GET("/apollo/:id/:app_id/config", ListApolloConfigByType)
 		configuration.GET("/apollo/:id/:app_id/:env/:cluster/namespace", ListApolloNamespaces)
+		configuration.GET("/apollo/:id/:app_id/:env/:cluster/namespace/:namespace", ListApolloConfig)
+
+		configuration.GET("/nacos/:id/config", ListNacosConfigByType)
+		configuration.GET("/nacos/:id/namespace/:namespace/group/:group_name/data/:data_name", GetNacosConfig)
 	}
 
 	imapp := router.Group("im_app")
@@ -271,6 +284,17 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		imapp.POST("/validate", ValidateIMApp)
 	}
 
+	observability := router.Group("observability")
+	{
+		observability.GET("", ListObservability)
+		observability = observability.Group("", isSystemAdmin)
+		observability.GET("/detail", ListObservabilityDetail)
+		observability.POST("", CreateObservability)
+		observability.PUT("/:id", UpdateObservability)
+		observability.DELETE("/:id", DeleteObservability)
+		observability.POST("/validate", ValidateObservability)
+	}
+
 	lark := router.Group("lark")
 	{
 		lark.GET("/:id/department/:department_id", GetLarkDepartment)
@@ -278,16 +302,26 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		lark.POST("/:id/webhook", LarkEventHandler)
 	}
 
+	dingtalk := router.Group("dingtalk")
+	{
+		dingtalk.GET("/:id/department/:department_id", GetDingTalkDepartment)
+		dingtalk.GET("/:id/user", GetDingTalkUserID)
+		dingtalk.POST("/:ak/webhook", DingTalkEventHandler)
+	}
+
 	pm := router.Group("project_management")
 	{
 		pm.GET("", ListProjectManagement)
+		pm.GET("/project", ListProjectManagementForProject)
 		pm.POST("", CreateProjectManagement)
 		pm.POST("/validate", Validate)
 		pm.PATCH("/:id", UpdateProjectManagement)
 		pm.DELETE("/:id", DeleteProjectManagement)
-		pm.GET("/jira/project", ListJiraProjects)
-		pm.GET("/jira/issue", SearchJiraIssues)
-		pm.GET("/jira/type", GetJiraTypes)
+		pm.GET("/:id/jira/project", ListJiraProjects)
+		pm.GET("/:id/jira/issue", SearchJiraIssues)
+		pm.GET("/:id/jira/issue/jql", SearchJiraProjectIssuesWithJQL)
+		pm.GET("/:id/jira/type", GetJiraTypes)
+		pm.GET("/:id/jira/status", GetJiraAllStatus)
 		pm.POST("/jira/webhook/:workflowName/:hookName", HandleJiraEvent)
 		pm.POST("/meego/webhook/:workflowName/:hookName", HandleMeegoEvent)
 	}
@@ -304,6 +338,13 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		dashboard.GET("/environment/:name", GetMyEnvironment)
 	}
 
+	// initialization apis
+	init := router.Group("initialization")
+	{
+		init.GET("/status", GetSystemInitializationStatus)
+		init.POST("/user", InitializeUser)
+	}
+
 	// get nacos info
 	nacos := router.Group("nacos")
 	{
@@ -314,10 +355,22 @@ func (*Router) Inject(router *gin.RouterGroup) {
 	// feishu project management module
 	meego := router.Group("meego")
 	{
-		meego.GET("/projects", GetMeegoProjects)
-		meego.GET("/projects/:projectID/work_item/types", GetWorkItemTypeList)
-		meego.GET("/projects/:projectID/work_item", ListMeegoWorkItems)
-		meego.GET("/projects/:projectID/work_item/:workItemID/transitions", ListAvailableWorkItemTransitions)
+		meego.GET("/:id/projects", GetMeegoProjects)
+		meego.GET("/:id/projects/:projectID/work_item/types", GetWorkItemTypeList)
+		meego.GET("/:id/projects/:projectID/work_item", ListMeegoWorkItems)
+		meego.GET("/:id/projects/:projectID/work_item/:workItemID/transitions", ListAvailableWorkItemTransitions)
+	}
+
+	// guanceyun api
+	guanceyun := router.Group("guanceyun")
+	{
+		guanceyun.GET("/:id/monitor", ListGuanceyunMonitor)
+	}
+
+	// grafana
+	grafana := router.Group("grafana")
+	{
+		grafana.GET("/:id/alert", ListGrafanaAlert)
 	}
 
 	// personal favorite API
@@ -325,6 +378,42 @@ func (*Router) Inject(router *gin.RouterGroup) {
 	{
 		favorite.POST("/:type/:name", CreateFavorite)
 		favorite.DELETE("/:type/:name", DeleteFavorite)
+	}
+
+	// ---------------------------------------------------------------------------------------
+	// external system API
+	// ---------------------------------------------------------------------------------------
+	llm := router.Group("llm")
+	{
+		llm.POST("/integration", CreateLLMIntegration)
+		llm.GET("/integration", ListLLMIntegration)
+		llm.GET("/integration/check", CheckLLMIntegration)
+		llm.GET("/integration/:id", GetLLMIntegration)
+		llm.PUT("/integration/:id", UpdateLLMIntegration)
+		llm.DELETE("/integration/:id", DeleteLLMIntegration)
+	}
+
+	// ---------------------------------------------------------------------------------------
+	// webhook config
+	// ---------------------------------------------------------------------------------------
+	webhook := router.Group("webhook")
+	{
+		webhook.GET("/config", GetWebhookConfig)
+	}
+
+	// ---------------------------------------------------------------------------------------
+	// database instance
+	// ---------------------------------------------------------------------------------------
+	dbs := router.Group("dbinstance")
+	{
+		dbs.POST("", CreateDBInstance)
+		dbs.GET("", ListDBInstanceInfo)
+		dbs.GET("/project", ListDBInstancesInfoByProject)
+		dbs.GET("/detail", ListDBInstance)
+		dbs.GET("/:id", GetDBInstance)
+		dbs.PUT("/:id", UpdateDBInstance)
+		dbs.DELETE("/:id", DeleteDBInstance)
+		dbs.POST("/validate", ValidateDBInstance)
 	}
 }
 
@@ -334,5 +423,11 @@ func (*OpenAPIRouter) Inject(router *gin.RouterGroup) {
 	reg := router.Group("registry")
 	{
 		reg.POST("", OpenAPICreateRegistry)
+		reg.GET("", OpenAPIListRegistry)
+	}
+
+	cluster := router.Group("cluster")
+	{
+		cluster.GET("", OpenAPIListCluster)
 	}
 }

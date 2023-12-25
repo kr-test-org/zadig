@@ -19,8 +19,8 @@ package models
 import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/types"
 )
 
 type Build struct {
@@ -41,6 +41,7 @@ type Build struct {
 	Repos        []*types.Repository    `bson:"repos"                         json:"repos"`
 	PreBuild     *PreBuild              `bson:"pre_build"                     json:"pre_build"`
 	JenkinsBuild *JenkinsBuild          `bson:"jenkins_build,omitempty"       json:"jenkins_build,omitempty"`
+	ScriptType   types.ScriptType       `bson:"script_type"                   json:"script_type"`
 	Scripts      string                 `bson:"scripts"                       json:"scripts"`
 	PostBuild    *PostBuild             `bson:"post_build,omitempty"          json:"post_build"`
 
@@ -57,6 +58,8 @@ type Build struct {
 	// New since V1.10.0. Only to tell the webpage should the advanced settings be displayed
 	AdvancedSettingsModified bool      `bson:"advanced_setting_modified" json:"advanced_setting_modified"`
 	Outputs                  []*Output `bson:"outputs"                   json:"outputs"`
+	Infrastructure           string    `bson:"infrastructure"            json:"infrastructure"`
+	VMLabels                 []string  `bson:"vm_labels"                 json:"vm_labels"`
 }
 
 // PreBuild prepares an environment for a job
@@ -79,9 +82,9 @@ type PreBuild struct {
 	// Parameters
 	Parameters []*Parameter `bson:"parameters,omitempty"   json:"parameters"`
 	// UploadPkg uploads package to s3
-	UploadPkg bool   `bson:"upload_pkg"                      json:"upload_pkg"`
-	ClusterID string `bson:"cluster_id"                      json:"cluster_id"`
-
+	UploadPkg  bool   `bson:"upload_pkg"                      json:"upload_pkg"`
+	ClusterID  string `bson:"cluster_id"                      json:"cluster_id"`
+	StrategyID string `bson:"strategy_id"                     json:"strategy_id"`
 	// UseHostDockerDaemon determines is dockerDaemon on host node is used in pod
 	UseHostDockerDaemon bool `bson:"use_host_docker_daemon" json:"use_host_docker_daemon"`
 

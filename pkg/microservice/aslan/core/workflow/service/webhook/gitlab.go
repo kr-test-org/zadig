@@ -27,12 +27,12 @@ import (
 	"github.com/xanzy/go-gitlab"
 	"go.uber.org/zap"
 
-	"github.com/koderover/zadig/pkg/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	gitservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/git"
-	"github.com/koderover/zadig/pkg/setting"
-	e "github.com/koderover/zadig/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	gitservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/git"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
 )
 
 type EventPush struct {
@@ -384,7 +384,7 @@ func SyncServiceTemplateFromGitlab(service *commonmodels.Service, log *zap.Sugar
 	}
 	// 在Ensure过程中会检查source，如果source为gitlab，则同步gitlab内容到service中
 	if err := fillServiceTmpl(setting.WebhookTaskCreator, service, log); err != nil {
-		log.Errorf("ensureServiceTmpl error: %+v", err)
+		log.Errorf("fillServiceTmpl error: %+v", err)
 		return e.ErrValidateTemplate.AddDesc(err.Error())
 	}
 	log.Infof("End of sync service template %s from gitlab path %s", service.ServiceName, service.SrcPath)

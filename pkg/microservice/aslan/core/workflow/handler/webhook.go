@@ -25,10 +25,9 @@ import (
 	"github.com/xanzy/go-gitlab"
 	"go.uber.org/zap"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/webhook"
-	internalhandler "github.com/koderover/zadig/pkg/shared/handler"
-	"github.com/koderover/zadig/pkg/tool/codehub"
-	"github.com/koderover/zadig/pkg/tool/gitee"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/workflow/service/webhook"
+	internalhandler "github.com/koderover/zadig/v2/pkg/shared/handler"
+	"github.com/koderover/zadig/v2/pkg/tool/gitee"
 )
 
 func ProcessWebHook(c *gin.Context) {
@@ -44,8 +43,6 @@ func ProcessWebHook(c *gin.Context) {
 		ctx.Err = processGithub(payload, c.Request, ctx.RequestID, ctx.Logger)
 	} else if gitlab.HookEventType(c.Request) != "" {
 		ctx.Err = webhook.ProcessGitlabHook(payload, c.Request, ctx.RequestID, ctx.Logger)
-	} else if codehub.HookEventType(c.Request) != "" {
-		ctx.Err = webhook.ProcessCodehubHook(payload, c.Request, ctx.RequestID, ctx.Logger)
 	} else if gitee.HookEventType(c.Request) != "" {
 		ctx.Err = webhook.ProcessGiteeHook(payload, c.Request, ctx.RequestID, ctx.Logger)
 	} else {

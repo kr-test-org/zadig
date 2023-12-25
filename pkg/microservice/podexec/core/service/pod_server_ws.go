@@ -26,30 +26,38 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/workflowcontroller"
-	internalhandler "github.com/koderover/zadig/pkg/shared/handler"
-	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	"github.com/koderover/zadig/pkg/tool/kube/getter"
-	"github.com/koderover/zadig/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/workflowcontroller"
+	internalhandler "github.com/koderover/zadig/v2/pkg/shared/handler"
+	kubeclient "github.com/koderover/zadig/v2/pkg/shared/kube/client"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/tool/kube/getter"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
 )
 
 func ServeWs(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
-	namespace := c.Param("namespace")
 	podName := c.Param("podName")
 	containerName := c.Param("containerName")
-	clusterID := c.Query("clusterId")
 
-	if namespace == "" || podName == "" || containerName == "" {
-		ctx.Err = e.ErrInvalidParam.AddDesc("namespace,podName,containerName can't be empty,please check!")
+	if podName == "" {
+		ctx.Err = e.ErrInvalidParam.AddDesc("containerName can't be empty,please check!")
 		return
 	}
-	log.Infof("exec containerName: %s, pod: %s, namespace: %s", containerName, podName, namespace)
+	log.Infof("exec containerName: %s, pod: %s", containerName, podName)
+
+	productName := c.Query("projectName")
+	envName := c.Param("envName")
+	productInfo, err := commonrepo.NewProductColl().Find(&commonrepo.ProductFindOptions{Name: productName, EnvName: envName})
+	if err != nil {
+		ctx.Err = e.ErrInternalError.AddDesc(fmt.Sprintf("failed to find product %s/%s, err: %s", productName, envName, err))
+		return
+	}
+	namespace, clusterID := productInfo.Namespace, productInfo.ClusterID
 
 	pty, err := NewTerminalSession(c.Writer, c.Request, nil)
 	if err != nil {

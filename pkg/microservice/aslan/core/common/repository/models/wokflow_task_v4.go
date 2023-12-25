@@ -21,8 +21,9 @@ import (
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	"github.com/koderover/zadig/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commontypes "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/types"
+	"github.com/koderover/zadig/v2/pkg/types"
 )
 
 type WorkflowTask struct {
@@ -52,7 +53,6 @@ type WorkflowTask struct {
 	Error               string             `bson:"error,omitempty"           json:"error,omitempty"`
 	IsRestart           bool               `bson:"is_restart"                json:"is_restart"`
 	IsDebug             bool               `bson:"is_debug"                  json:"is_debug"`
-	MultiRun            bool               `bson:"multi_run"                 json:"multi_run"`
 	ShareStorages       []*ShareStorage    `bson:"share_storages"            json:"share_storages"`
 }
 
@@ -72,23 +72,91 @@ type StageTask struct {
 }
 
 type JobTask struct {
-	Name string `bson:"name"                json:"name"`
+	ProjectKey  string `bson:"project_key"         json:"project_key"`
+	WorkflowKey string `bson:"workflow_key"        json:"workflow_key"`
+	Name        string `bson:"name"                json:"name"`
 	// jobTask unique id, unique in the workflow
 	Key        string `bson:"key"                 json:"key"`
 	K8sJobName string `bson:"k8s_job_name"        json:"k8s_job_name"`
 	// JobInfo contains the fields that make up the job task name, for frontend display
-	JobInfo          interface{}   `bson:"job_info"            json:"job_info"`
-	JobType          string        `bson:"type"                json:"type"`
-	Status           config.Status `bson:"status"              json:"status"`
-	StartTime        int64         `bson:"start_time"          json:"start_time,omitempty"`
-	EndTime          int64         `bson:"end_time"            json:"end_time,omitempty"`
-	Error            string        `bson:"error"               json:"error"`
-	Timeout          int64         `bson:"timeout"             json:"timeout"`
-	Retry            int64         `bson:"retry"               json:"retry"`
-	Spec             interface{}   `bson:"spec"                json:"spec"`
-	Outputs          []*Output     `bson:"outputs"             json:"outputs"`
-	BreakpointBefore bool          `bson:"breakpoint_before"   json:"breakpoint_before"`
-	BreakpointAfter  bool          `bson:"breakpoint_after"    json:"breakpoint_after"`
+	JobInfo          interface{}              `bson:"job_info"            json:"job_info"`
+	JobType          string                   `bson:"type"                json:"type"`
+	Status           config.Status            `bson:"status"              json:"status"`
+	StartTime        int64                    `bson:"start_time"          json:"start_time,omitempty"`
+	EndTime          int64                    `bson:"end_time"            json:"end_time,omitempty"`
+	Error            string                   `bson:"error"               json:"error"`
+	Timeout          int64                    `bson:"timeout"             json:"timeout"`
+	Retry            int64                    `bson:"retry"               json:"retry"`
+	Spec             interface{}              `bson:"spec"                json:"spec"`
+	Outputs          []*Output                `bson:"outputs"             json:"outputs"`
+	BreakpointBefore bool                     `bson:"breakpoint_before"   json:"breakpoint_before"`
+	BreakpointAfter  bool                     `bson:"breakpoint_after"    json:"breakpoint_after"`
+	ServiceModules   []*WorkflowServiceModule `bson:"service_modules"     json:"service_modules"`
+	Infrastructure   string                   `bson:"infrastructure"      json:"infrastructure"`
+	VMLabels         []string                 `bson:"vm_labels"           json:"vm_labels"`
+}
+
+type TaskJobInfo struct {
+	RandStr       string `bson:"rand_str"        json:"rand_str"`
+	TestType      string `bson:"test_type"       json:"test_type"`
+	TestingName   string `bson:"testing_name"    json:"testing_name"`
+	JobName       string `bson:"job_name"        json:"job_name"`
+	ServiceName   string `bson:"service_name"    json:"service_name"`
+	ServiceModule string `bson:"service_module"  json:"service_module"`
+}
+
+type WorkflowTaskPreview struct {
+	TaskID              int64           `bson:"task_id"               json:"task_id"`
+	TaskCreator         string          `bson:"task_creator"          json:"task_creator"`
+	ProjectName         string          `bson:"project_name"          json:"project_name"`
+	WorkflowName        string          `bson:"workflow_name"         json:"workflow_name"`
+	WorkflowDisplayName string          `bson:"workflow_display_name" json:"workflow_display_name"`
+	Status              config.Status   `bson:"status"                json:"status"`
+	CreateTime          int64           `bson:"create_time"           json:"create_time,omitempty"`
+	StartTime           int64           `bson:"start_time"            json:"start_time,omitempty"`
+	EndTime             int64           `bson:"end_time"              json:"end_time,omitempty"`
+	WorkflowArgs        *WorkflowV4     `bson:"workflow_args"         json:"-"`
+	Stages              []*StagePreview `bson:"stages"                json:"stages,omitempty"`
+}
+
+type StagePreview struct {
+	Name      string        `bson:"name"          json:"name"`
+	Status    config.Status `bson:"status"        json:"status"`
+	StartTime int64         `bson:"start_time"    json:"start_time,omitempty"`
+	EndTime   int64         `bson:"end_time"      json:"end_time,omitempty"`
+	Parallel  bool          `bson:"parallel"      json:"parallel,omitempty"`
+	Approval  *Approval     `bson:"approval"      json:"approval,omitempty"`
+	Jobs      []*JobPreview `bson:"jobs"          json:"jobs,omitempty"`
+	Error     string        `bson:"error"         json:"error"`
+}
+
+type JobPreview struct {
+	Name           string                   `bson:"name"                json:"name"`
+	JobType        string                   `bson:"type"                json:"type"`
+	Status         config.Status            `bson:"status"              json:"status"`
+	StartTime      int64                    `bson:"start_time"          json:"start_time,omitempty"`
+	EndTime        int64                    `bson:"end_time"            json:"end_time,omitempty"`
+	Error          string                   `bson:"error"               json:"error"`
+	Timeout        int64                    `bson:"timeout"             json:"timeout"`
+	Retry          int64                    `bson:"retry"               json:"retry"`
+	ServiceModules []*WorkflowServiceModule `bson:"-"                   json:"service_modules"`
+	TestModules    []*WorkflowTestModule    `bson:"-"                   json:"test_modules"`
+	Envs           *WorkflowEnv             `bson:"-"                   json:"envs"`
+}
+
+type WorkflowTestModule struct {
+	RunningJobName string  `json:"running_job_name"`
+	Type           string  `json:"type"`
+	TestName       string  `json:"name"`
+	TestCaseNum    int     `json:"total_case_num"`
+	SuccessCaseNum int     `json:"success_case_num"`
+	TestTime       float64 `json:"time"`
+	Error          string  `json:"error"`
+}
+
+type WorkflowEnv struct {
+	EnvName    string `json:"env_name"`
+	Production bool   `json:"production"`
 }
 
 type JobTaskCustomDeploySpec struct {
@@ -104,21 +172,23 @@ type JobTaskCustomDeploySpec struct {
 }
 
 type JobTaskDeploySpec struct {
-	Env                string                 `bson:"env"                              json:"env"                                 yaml:"env"`
-	ServiceName        string                 `bson:"service_name"                     json:"service_name"                        yaml:"service_name"`
-	Production         bool                   `bson:"production"                       json:"production"                          yaml:"production"`
-	DeployContents     []config.DeployContent `bson:"deploy_contents"                  json:"deploy_contents"                     yaml:"deploy_contents"`
-	KeyVals            []*ServiceKeyVal       `bson:"key_vals"                         json:"key_vals"                            yaml:"key_vals"`
-	UpdateConfig       bool                   `bson:"update_config"                    json:"update_config"                       yaml:"update_config"`
-	YamlContent        string                 `bson:"yaml_content"                     json:"yaml_content"                        yaml:"yaml_content"`
-	ServiceAndImages   []*DeployServiceModule `bson:"service_and_images"               json:"service_and_images"                  yaml:"service_and_images"`
-	ServiceType        string                 `bson:"service_type"                     json:"service_type"                        yaml:"service_type"`
-	CreateEnvType      string                 `bson:"env_type"                         json:"env_type"                            yaml:"env_type"`
-	SkipCheckRunStatus bool                   `bson:"skip_check_run_status"            json:"skip_check_run_status"               yaml:"skip_check_run_status"`
-	ClusterID          string                 `bson:"cluster_id"                       json:"cluster_id"                          yaml:"cluster_id"`
-	Timeout            int                    `bson:"timeout"                          json:"timeout"                             yaml:"timeout"`
-	ReplaceResources   []Resource             `bson:"replace_resources"                json:"replace_resources"                   yaml:"replace_resources"`
-	RelatedPodLabels   []map[string]string    `bson:"-"                                json:"-"                                   yaml:"-"`
+	Env                string                          `bson:"env"                              json:"env"                                 yaml:"env"`
+	ServiceName        string                          `bson:"service_name"                     json:"service_name"                        yaml:"service_name"`
+	Production         bool                            `bson:"production"                       json:"production"                          yaml:"production"`
+	DeployContents     []config.DeployContent          `bson:"deploy_contents"                  json:"deploy_contents"                     yaml:"deploy_contents"`
+	KeyVals            []*ServiceKeyVal                `bson:"key_vals"                         json:"key_vals"                            yaml:"key_vals"`         // deprecated since 1.18.0
+	VariableConfigs    []*DeplopyVariableConfig        `bson:"variable_configs"                 json:"variable_configs"                    yaml:"variable_configs"` // new since 1.18.0, only used for k8s
+	VariableKVs        []*commontypes.RenderVariableKV `bson:"variable_kvs"                     json:"variable_kvs"                        yaml:"variable_kvs"`     // new since 1.18.0, only used for k8s
+	UpdateConfig       bool                            `bson:"update_config"                    json:"update_config"                       yaml:"update_config"`
+	YamlContent        string                          `bson:"yaml_content"                     json:"yaml_content"                        yaml:"yaml_content"`
+	ServiceAndImages   []*DeployServiceModule          `bson:"service_and_images"               json:"service_and_images"                  yaml:"service_and_images"`
+	ServiceType        string                          `bson:"service_type"                     json:"service_type"                        yaml:"service_type"`
+	CreateEnvType      string                          `bson:"env_type"                         json:"env_type"                            yaml:"env_type"`
+	SkipCheckRunStatus bool                            `bson:"skip_check_run_status"            json:"skip_check_run_status"               yaml:"skip_check_run_status"`
+	ClusterID          string                          `bson:"cluster_id"                       json:"cluster_id"                          yaml:"cluster_id"`
+	Timeout            int                             `bson:"timeout"                          json:"timeout"                             yaml:"timeout"`
+	ReplaceResources   []Resource                      `bson:"replace_resources"                json:"replace_resources"                   yaml:"replace_resources"`
+	RelatedPodLabels   []map[string]string             `bson:"-"                                json:"-"                                   yaml:"-"`
 	// for compatibility
 	ServiceModule string `bson:"service_module"                   json:"service_module"                      yaml:"-"`
 	Image         string `bson:"image"                            json:"image"                               yaml:"-"`
@@ -139,12 +209,18 @@ type Resource struct {
 }
 
 type JobTaskHelmDeploySpec struct {
-	Env                string                   `bson:"env"                              json:"env"                                 yaml:"env"`
-	ServiceName        string                   `bson:"service_name"                     json:"service_name"                        yaml:"service_name"`
-	ServiceType        string                   `bson:"service_type"                     json:"service_type"                        yaml:"service_type"`
-	DeployContents     []config.DeployContent   `bson:"deploy_contents"                  json:"deploy_contents"                     yaml:"deploy_contents"`
-	KeyVals            []*ServiceKeyVal         `bson:"key_vals"                         json:"key_vals"                            yaml:"key_vals"`
-	YamlContent        string                   `bson:"yaml_content"                     json:"yaml_content"                        yaml:"yaml_content"`
+	Env            string                 `bson:"env"                              json:"env"                                 yaml:"env"`
+	ServiceName    string                 `bson:"service_name"                     json:"service_name"                        yaml:"service_name"`
+	ServiceType    string                 `bson:"service_type"                     json:"service_type"                        yaml:"service_type"`
+	DeployContents []config.DeployContent `bson:"deploy_contents"                  json:"deploy_contents"                     yaml:"deploy_contents"`
+	KeyVals        []*ServiceKeyVal       `bson:"key_vals"                         json:"key_vals"                            yaml:"key_vals"`
+	// VariableYaml stores the variable YAML provided by user
+	VariableYaml string `bson:"variable_yaml"                    json:"variable_yaml"                       yaml:"variable_yaml"`
+	// IsProduction added since 1.18, indicator of production environment deployment job
+	IsProduction bool   `bson:"is_production" yaml:"is_production" json:"is_production"`
+	YamlContent  string `bson:"yaml_content"                     json:"yaml_content"                        yaml:"yaml_content"`
+	// UserSuppliedValue added since 1.18, the values that users gives.
+	UserSuppliedValue  string                   `bson:"user_supplied_value" json:"user_supplied_value" yaml:"user_supplied_value"`
 	UpdateConfig       bool                     `bson:"update_config"                    json:"update_config"                       yaml:"update_config"`
 	SkipCheckRunStatus bool                     `bson:"skip_check_run_status"            json:"skip_check_run_status"               yaml:"skip_check_run_status"`
 	ImageAndModules    []*ImageAndServiceModule `bson:"image_and_service_modules"        json:"image_and_service_modules"           yaml:"image_and_service_modules"`
@@ -152,6 +228,14 @@ type JobTaskHelmDeploySpec struct {
 	ReleaseName        string                   `bson:"release_name"                     json:"release_name"                        yaml:"release_name"`
 	Timeout            int                      `bson:"timeout"                          json:"timeout"                             yaml:"timeout"`
 	ReplaceResources   []Resource               `bson:"replace_resources"                json:"replace_resources"                   yaml:"replace_resources"`
+}
+
+type JobTaskHelmChartDeploySpec struct {
+	Env                string           `bson:"env"                              json:"env"                                 yaml:"env"`
+	DeployHelmChart    *DeployHelmChart `bson:"deploy_helm_chart"       yaml:"deploy_helm_chart"          json:"deploy_helm_chart"`
+	SkipCheckRunStatus bool             `bson:"skip_check_run_status"            json:"skip_check_run_status"               yaml:"skip_check_run_status"`
+	ClusterID          string           `bson:"cluster_id"                       json:"cluster_id"                          yaml:"cluster_id"`
+	Timeout            int              `bson:"timeout"                          json:"timeout"                             yaml:"timeout"`
 }
 
 type ImageAndServiceModule struct {
@@ -187,6 +271,14 @@ type JobTaskBlueGreenDeploySpec struct {
 	Events             *Events `bson:"events"                      json:"events"                     yaml:"events"`
 }
 
+type JobTaskBlueGreenDeployV2Spec struct {
+	Production    bool                      `bson:"production"               json:"production"              yaml:"production"`
+	Env           string                    `bson:"env"               json:"env"              yaml:"env"`
+	Service       *BlueGreenDeployV2Service `bson:"service"                      json:"service"                     yaml:"service"`
+	Events        *Events                   `bson:"events"                      json:"events"                     yaml:"events"`
+	DeployTimeout int                       `bson:"deploy_timeout"              json:"deploy_timeout"             yaml:"deploy_timeout"`
+}
+
 type JobTaskBlueGreenReleaseSpec struct {
 	ClusterID          string  `bson:"cluster_id"             json:"cluster_id"            yaml:"cluster_id"`
 	Namespace          string  `bson:"namespace"              json:"namespace"             yaml:"namespace"`
@@ -199,6 +291,15 @@ type JobTaskBlueGreenReleaseSpec struct {
 	Image              string  `bson:"image"                  json:"image"                 yaml:"image"`
 	ContainerName      string  `bson:"container_name"         json:"container_name"        yaml:"container_name"`
 	Events             *Events `bson:"events"                 json:"events"                yaml:"events"`
+}
+
+type JobTaskBlueGreenReleaseV2Spec struct {
+	Production    bool                      `bson:"production"               json:"production"              yaml:"production"`
+	Env           string                    `bson:"env"               json:"env"              yaml:"env"`
+	Namespace     string                    `bson:"namespace"              json:"namespace"             yaml:"namespace"`
+	Service       *BlueGreenDeployV2Service `bson:"service"                      json:"service"                     yaml:"service"`
+	Events        *Events                   `bson:"events"                 json:"events"                yaml:"events"`
+	DeployTimeout int                       `bson:"deploy_timeout"              json:"deploy_timeout"             yaml:"deploy_timeout"`
 }
 
 type JobTaskCanaryDeploySpec struct {
@@ -280,6 +381,7 @@ type MeegoTransitionSpec struct {
 	Source          string                     `bson:"source"             json:"source"             yaml:"source"`
 	ProjectKey      string                     `bson:"project_key"        json:"project_key"        yaml:"project_key"`
 	ProjectName     string                     `bson:"project_name"       json:"project_name"       yaml:"project_name"`
+	MeegoID         string                     `bson:"meego_id"           json:"meego_id"           yaml:"meego_id"`
 	WorkItemType    string                     `bson:"work_item_type"     json:"work_item_type"     yaml:"work_item_type"`
 	WorkItemTypeKey string                     `bson:"work_item_type_key" json:"work_item_type_key" yaml:"work_item_type_key"`
 	WorkItems       []*MeegoWorkItemTransition `bson:"work_items"         json:"work_items"         yaml:"work_items"`
@@ -303,18 +405,19 @@ type JobTaskGrayRollbackSpec struct {
 type JobTasK8sPatchSpec struct {
 	ClusterID  string           `bson:"cluster_id"             json:"cluster_id"             yaml:"cluster_id"`
 	Namespace  string           `bson:"namespace"              json:"namespace"              yaml:"namespace"`
-	PatchItems []*PatchTaskItem `bson:"patch_items"            json:"patch_items"           yaml:"patch_items"`
+	PatchItems []*PatchTaskItem `bson:"patch_items"            json:"patch_items"            yaml:"patch_items"`
 }
 
 type IssueID struct {
 	Key    string `bson:"key" json:"key" yaml:"key"`
 	Name   string `bson:"name" json:"name" yaml:"name"`
-	Status string `bson:"status" json:"status" yaml:"status"`
-	Link   string `bson:"link" json:"link" yaml:"link"`
+	Status string `bson:"status,omitempty" json:"status,omitempty" yaml:"status,omitempty"`
+	Link   string `bson:"link,omitempty" json:"link,omitempty" yaml:"link,omitempty"`
 }
 
 type JobTaskJiraSpec struct {
 	ProjectID    string     `bson:"project_id"  json:"project_id"  yaml:"project_id"`
+	JiraID       string     `bson:"jira_id"  json:"jira_id"  yaml:"jira_id"`
 	IssueType    string     `bson:"issue_type"  json:"issue_type"  yaml:"issue_type"`
 	Issues       []*IssueID `bson:"issues" json:"issues" yaml:"issues"`
 	TargetStatus string     `bson:"target_status" json:"target_status" yaml:"target_status"`
@@ -335,6 +438,12 @@ type NacosData struct {
 	Error             string `bson:"error"      json:"error"      yaml:"error"`
 }
 
+type JobTaskSQLSpec struct {
+	ID   string                `bson:"id" json:"id" yaml:"id"`
+	Type config.DBInstanceType `bson:"type" json:"type" yaml:"type"`
+	SQL  string                `bson:"sql" json:"sql" yaml:"sql"`
+}
+
 type JobTaskApolloSpec struct {
 	ApolloID      string                    `bson:"apolloID" json:"apolloID" yaml:"apolloID"`
 	NamespaceList []*JobTaskApolloNamespace `bson:"namespaceList" json:"namespaceList" yaml:"namespaceList"`
@@ -348,6 +457,19 @@ type JobTaskApolloNamespace struct {
 type ApolloKV struct {
 	Key string `bson:"key" json:"key" yaml:"key"`
 	Val string `bson:"val" json:"val" yaml:"val"`
+}
+
+type JobTaskJenkinsSpec struct {
+	ID   string                `bson:"id" json:"id" yaml:"id"`
+	Host string                `bson:"host" json:"host" yaml:"host"`
+	Job  JobTaskJenkinsJobInfo `bson:"job" json:"job" yaml:"job"`
+}
+
+type JobTaskJenkinsJobInfo struct {
+	JobName    string                 `bson:"job_name" json:"job_name" yaml:"job_name"`
+	JobID      int                    `bson:"job_id" json:"job_id" yaml:"job_id"`
+	JobOutput  string                 `bson:"job_output" json:"job_output" yaml:"job_output"`
+	Parameters []*JenkinsJobParameter `bson:"parameters" json:"parameters" yaml:"parameters"`
 }
 
 type JobTaskWorkflowTriggerSpec struct {
@@ -375,6 +497,50 @@ type JobTaskOfflineServiceSpec struct {
 }
 
 type JobTaskOfflineServiceEvent struct {
+	ServiceName string        `bson:"service_name" json:"service_name" yaml:"service_name"`
+	Status      config.Status `bson:"status" json:"status" yaml:"status"`
+	Error       string        `bson:"error" json:"error" yaml:"error"`
+}
+
+type JobTaskGrafanaSpec struct {
+	ID   string `bson:"id" json:"id" yaml:"id"`
+	Name string `bson:"name" json:"name" yaml:"name"`
+	// CheckTime minute
+	CheckTime int64           `bson:"check_time" json:"check_time" yaml:"check_time"`
+	CheckMode string          `bson:"check_mode" json:"check_mode" yaml:"check_mode"`
+	Alerts    []*GrafanaAlert `bson:"alerts" json:"alerts" yaml:"alerts"`
+}
+
+type JobTaskGuanceyunCheckSpec struct {
+	ID   string `bson:"id" json:"id" yaml:"id"`
+	Name string `bson:"name" json:"name" yaml:"name"`
+	// CheckTime minute
+	CheckTime int64               `bson:"check_time" json:"check_time" yaml:"check_time"`
+	CheckMode string              `bson:"check_mode" json:"check_mode" yaml:"check_mode"`
+	Monitors  []*GuanceyunMonitor `bson:"monitors" json:"monitors" yaml:"monitors"`
+}
+
+type JobTaskMseGrayReleaseSpec struct {
+	Production         bool                  `bson:"production" json:"production" yaml:"production"`
+	GrayTag            string                `bson:"gray_tag" json:"gray_tag" yaml:"gray_tag"`
+	BaseEnv            string                `bson:"base_env" json:"base_env" yaml:"base_env"`
+	GrayEnv            string                `bson:"gray_env" json:"gray_env" yaml:"gray_env"`
+	SkipCheckRunStatus bool                  `bson:"skip_check_run_status" json:"skip_check_run_status" yaml:"skip_check_run_status"`
+	GrayService        MseGrayReleaseService `bson:"gray_service" json:"gray_service" yaml:"gray_service"`
+	Events             []*Event              `bson:"events" json:"events" yaml:"events"`
+	Timeout            int                   `bson:"timeout" json:"timeout" yaml:"timeout"`
+}
+
+type JobTaskMseGrayOfflineSpec struct {
+	Production      bool                     `bson:"production" json:"production" yaml:"production"`
+	Env             string                   `bson:"env" json:"env" yaml:"env"`
+	GrayTag         string                   `bson:"gray_tag" json:"gray_tag" yaml:"gray_tag"`
+	Namespace       string                   `bson:"namespace" json:"namespace" yaml:"namespace"`
+	OfflineServices []*MseGrayOfflineService `bson:"offline_services" json:"offline_services" yaml:"offline_services"`
+	Events          []*Event                 `bson:"events" json:"events" yaml:"events"`
+}
+
+type MseGrayOfflineService struct {
 	ServiceName string        `bson:"service_name" json:"service_name" yaml:"service_name"`
 	Status      config.Status `bson:"status" json:"status" yaml:"status"`
 	Error       string        `bson:"error" json:"error" yaml:"error"`
@@ -442,6 +608,7 @@ type WorkflowTaskCtx struct {
 	WorkflowTaskCreatorEmail    string
 	WorkflowTaskCreatorMobile   string
 	WorkflowKeyVals             []*KeyVal
+	GlobalContextGetAll         func() map[string]string
 	GlobalContextGet            func(key string) (string, bool)
 	GlobalContextSet            func(key, value string)
 	GlobalContextEach           func(f func(k, v string) bool)

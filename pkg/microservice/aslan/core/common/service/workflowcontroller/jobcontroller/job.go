@@ -19,7 +19,6 @@ package jobcontroller
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -30,11 +29,9 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/util"
-	"github.com/koderover/zadig/pkg/util/rand"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/util/rand"
 )
 
 type JobCtl interface {
@@ -52,6 +49,8 @@ func initJobCtl(job *commonmodels.JobTask, workflowCtx *commonmodels.WorkflowTas
 		jobCtl = NewDeployJobCtl(job, workflowCtx, ack, logger)
 	case string(config.JobZadigHelmDeploy):
 		jobCtl = NewHelmDeployJobCtl(job, workflowCtx, ack, logger)
+	case string(config.JobZadigHelmChartDeploy):
+		jobCtl = NewHelmChartDeployJobCtl(job, workflowCtx, ack, logger)
 	case string(config.JobCustomDeploy):
 		jobCtl = NewCustomDeployJobCtl(job, workflowCtx, ack, logger)
 	case string(config.JobPlugin):
@@ -61,9 +60,9 @@ func initJobCtl(job *commonmodels.JobTask, workflowCtx *commonmodels.WorkflowTas
 	case string(config.JobK8sCanaryRelease):
 		jobCtl = NewCanaryReleaseJobCtl(job, workflowCtx, ack, logger)
 	case string(config.JobK8sBlueGreenDeploy):
-		jobCtl = NewBlueGreenDeployJobCtl(job, workflowCtx, ack, logger)
+		jobCtl = NewBlueGreenDeployV2JobCtl(job, workflowCtx, ack, logger)
 	case string(config.JobK8sBlueGreenRelease):
-		jobCtl = NewBlueGreenReleaseJobCtl(job, workflowCtx, ack, logger)
+		jobCtl = NewBlueGreenReleaseV2JobCtl(job, workflowCtx, ack, logger)
 	case string(config.JobK8sGrayRelease):
 		jobCtl = NewGrayReleaseJobCtl(job, workflowCtx, ack, logger)
 	case string(config.JobK8sGrayRollback):
@@ -86,6 +85,18 @@ func initJobCtl(job *commonmodels.JobTask, workflowCtx *commonmodels.WorkflowTas
 		jobCtl = NewWorkflowTriggerJobCtl(job, workflowCtx, ack, logger)
 	case string(config.JobOfflineService):
 		jobCtl = NewOfflineServiceJobCtl(job, workflowCtx, ack, logger)
+	case string(config.JobMseGrayRelease):
+		jobCtl = NewMseGrayReleaseJobCtl(job, workflowCtx, ack, logger)
+	case string(config.JobMseGrayOffline):
+		jobCtl = NewMseGrayOfflineJobCtl(job, workflowCtx, ack, logger)
+	case string(config.JobGuanceyunCheck):
+		jobCtl = NewGuanceyunCheckJobCtl(job, workflowCtx, ack, logger)
+	case string(config.JobGrafana):
+		jobCtl = NewGrafanaJobCtl(job, workflowCtx, ack, logger)
+	case string(config.JobJenkins):
+		jobCtl = NewJenkinsJobCtl(job, workflowCtx, ack, logger)
+	case string(config.JobSQL):
+		jobCtl = NewSQLJobCtl(job, workflowCtx, ack, logger)
 	default:
 		jobCtl = NewFreestyleJobCtl(job, workflowCtx, ack, logger)
 	}
@@ -249,42 +260,6 @@ func logError(job *commonmodels.JobTask, msg string, logger *zap.SugaredLogger) 
 	logger.Error(msg)
 	job.Status = config.StatusFailed
 	job.Error = msg
-}
-
-// update product image info
-func updateProductImageByNs(namespace, productName, serviceName string, targets map[string]string, logger *zap.SugaredLogger) error {
-	opt := &commonrepo.ProductEnvFindOptions{
-		Name:      productName,
-		Namespace: namespace,
-	}
-
-	prod, err := commonrepo.NewProductColl().FindEnv(opt)
-
-	if err != nil {
-		logger.Errorf("find product namespace error: %v", err)
-		return err
-	}
-
-	for i, group := range prod.Services {
-		for j, service := range group {
-			if service.ServiceName == serviceName {
-				for l, container := range service.Containers {
-					if image, ok := targets[container.Name]; ok {
-						prod.Services[i][j].Containers[l].Image = image
-						prod.Services[i][j].Containers[l].ImageName = util.ExtractImageName(image)
-					}
-				}
-			}
-		}
-	}
-
-	if err := commonrepo.NewProductColl().Update(prod); err != nil {
-		errMsg := fmt.Sprintf("[%s][%s] update product image error: %v", prod.EnvName, prod.ProductName, err)
-		logger.Errorf(errMsg)
-		return errors.New(errMsg)
-	}
-
-	return nil
 }
 
 func getMatchedRegistries(image string, registries []*commonmodels.RegistryNamespace) []*commonmodels.RegistryNamespace {

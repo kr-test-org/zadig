@@ -23,44 +23,50 @@ import (
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	templaterepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb/template"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	commonutil "github.com/koderover/zadig/pkg/microservice/aslan/core/common/util"
-	"github.com/koderover/zadig/pkg/setting"
-	e "github.com/koderover/zadig/pkg/tool/errors"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/util"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	templaterepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb/template"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/repository"
+	commontypes "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/types"
+	commonutil "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/util"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/util"
+	yamlutil "github.com/koderover/zadig/v2/pkg/util/yaml"
 )
 
 func ListProductionServices(productName string, log *zap.SugaredLogger) (*service.ServiceTmplResp, error) {
 	resp := new(service.ServiceTmplResp)
 	resp.Data = make([]*service.ServiceProductMap, 0)
-	_, err := templaterepo.NewProductColl().Find(productName)
+	projectInfo, err := templaterepo.NewProductColl().Find(productName)
 	if err != nil {
 		log.Errorf("Can not find project %s, error: %s", productName, err)
 		return resp, e.ErrListTemplate.AddDesc(err.Error())
 	}
 
-	services, err := commonrepo.NewProductionServiceColl().ListMaxRevisions(productName, setting.K8SDeployType)
+	services, err := commonrepo.NewProductionServiceColl().ListMaxRevisionsByProject(productName, projectInfo.ProductFeature.DeployType)
 
 	if err != nil {
 		log.Errorf("Failed to list production services, err: %s", err)
 		return resp, e.ErrListTemplate.AddDesc(err.Error())
 	}
-
+	estimatedVariableYamlMap, estimatedVariableKVMap := service.GetEstimatedMergedVariables(services, projectInfo)
 	for _, serviceObject := range services {
 		spmap := &service.ServiceProductMap{
-			Service:     serviceObject.ServiceName,
-			Type:        serviceObject.Type,
-			Source:      serviceObject.Source,
-			ProductName: serviceObject.ProductName,
-			Containers:  serviceObject.Containers,
-			Visibility:  serviceObject.Visibility,
+			Service:                    serviceObject.ServiceName,
+			Type:                       serviceObject.Type,
+			Source:                     serviceObject.Source,
+			ProductName:                serviceObject.ProductName,
+			Containers:                 serviceObject.Containers,
+			CreateFrom:                 serviceObject.CreateFrom,
+			AutoSync:                   serviceObject.AutoSync,
+			EstimatedMergedVariable:    estimatedVariableYamlMap[serviceObject.ServiceName],
+			EstimatedMergedVariableKVs: estimatedVariableKVMap[serviceObject.ServiceName],
 		}
 		resp.Data = append(resp.Data, spmap)
 	}
@@ -69,25 +75,22 @@ func ListProductionServices(productName string, log *zap.SugaredLogger) (*servic
 	return resp, nil
 }
 
-func GetProductionK8sService(serviceName, productName string, log *zap.SugaredLogger) (*commonmodels.Service, error) {
-	var err error
-	productTmpl, err := templaterepo.NewProductColl().Find(productName)
-	if err != nil {
-		log.Errorf("Can not find project %s, error: %s", productName, err)
-		return nil, e.ErrGetTemplate.AddDesc(err.Error())
-	}
-
-	serviceObject, err := commonrepo.NewProductionServiceColl().Find(&commonrepo.ServiceFindOption{
+func GetProductionK8sService(serviceName, productName string, log *zap.SugaredLogger) (*commonservice.TemplateSvcResp, error) {
+	serviceObject, err := repository.QueryTemplateService(&commonrepo.ServiceFindOption{
 		ServiceName: serviceName,
 		ProductName: productName,
 		Type:        setting.K8SDeployType,
-	})
+	}, true)
 
 	if err != nil {
-		log.Errorf("Failed to list services by %+v, err: %s", productTmpl.AllServiceInfos(), err)
+		log.Errorf("Failed to list services by %+v, err: %s", serviceName, err)
 		return nil, e.ErrGetTemplate.AddDesc(err.Error())
 	}
-	return serviceObject, nil
+	resp := &commonservice.TemplateSvcResp{
+		Service:   serviceObject,
+		Resources: commonservice.GeneSvcStructure(serviceObject),
+	}
+	return resp, nil
 }
 
 func GetProductionK8sServiceOption(serviceName, productName string, log *zap.SugaredLogger) (*ServiceOption, error) {
@@ -127,6 +130,20 @@ func CreateK8sProductionService(productName string, serviceObject *models.Servic
 		if currentSvc.Yaml == serviceObject.Yaml && currentSvc.VariableYaml == serviceObject.VariableYaml {
 			return getProductionServiceOption(currentSvc, log)
 		}
+	}
+
+	// extract and merge service variables
+	extractVariableYmal, err := yamlutil.ExtractVariableYaml(serviceObject.Yaml)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract variable yaml from service yaml, err: %w", err)
+	}
+	extractServiceVariableKVs, err := commontypes.YamlToServiceVariableKV(extractVariableYmal, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert variable yaml to service variable kv, err: %w", err)
+	}
+	serviceObject.VariableYaml, serviceObject.ServiceVariableKVs, err = commontypes.MergeServiceVariableKVsIfNotExist(serviceObject.ServiceVariableKVs, extractServiceVariableKVs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to merge service variables, err %w", err)
 	}
 
 	err = ensureProductionServiceTmpl(serviceObject, log)
@@ -174,7 +191,7 @@ func ensureProductionServiceTmpl(args *commonmodels.Service, log *zap.SugaredLog
 	args.RenderedYaml = args.Yaml
 
 	var err error
-	args.RenderedYaml, err = renderK8sSvcYaml(args.RenderedYaml, args.ProductName, args.ServiceName, args.VariableYaml)
+	args.RenderedYaml, err = commonutil.RenderK8sSvcYamlStrict(args.RenderedYaml, args.ProductName, args.ServiceName, args.VariableYaml)
 	if err != nil {
 		return fmt.Errorf("failed to render yaml, err: %s", err)
 	}
@@ -190,8 +207,7 @@ func ensureProductionServiceTmpl(args *commonmodels.Service, log *zap.SugaredLog
 	}
 	log.Infof("find %d containers in service %s", len(args.Containers), args.ServiceName)
 
-	serviceTemplate := fmt.Sprintf(setting.ProductionServiceTemplateCounterName, args.ServiceName, args.ProductName)
-	rev, err := commonrepo.NewCounterColl().GetNextSeq(serviceTemplate)
+	rev, err := commonutil.GenerateServiceNextRevision(true, args.ServiceName, args.ProductName)
 	if err != nil {
 		return fmt.Errorf("get next service template revision error: %v", err)
 	}
@@ -212,16 +228,17 @@ func UpdateProductionServiceVariables(args *commonservice.ServiceTmplObject) err
 	}
 
 	currentService.VariableYaml = args.VariableYaml
+	currentService.ServiceVariableKVs = args.ServiceVariableKVs
+
+	// reparse service, check if container changes
+	currentService.RenderedYaml, err = commonutil.RenderK8sSvcYamlStrict(currentService.Yaml, args.ProductName, args.ServiceName, currentService.VariableYaml)
+	if err != nil {
+		return fmt.Errorf("failed to render yaml, err: %s", err)
+	}
 
 	err = commonrepo.NewProductionServiceColl().UpdateServiceVariables(currentService)
 	if err != nil {
 		return e.ErrUpdateService.AddErr(err)
-	}
-
-	// reparse service, check if container changes
-	currentService.RenderedYaml, err = renderK8sSvcYaml(currentService.Yaml, args.ProductName, args.ServiceName, currentService.VariableYaml)
-	if err != nil {
-		return fmt.Errorf("failed to render yaml, err: %s", err)
 	}
 
 	currentService.RenderedYaml = util.ReplaceWrapLine(currentService.RenderedYaml)
@@ -229,7 +246,6 @@ func UpdateProductionServiceVariables(args *commonservice.ServiceTmplObject) err
 	oldContainers := currentService.Containers
 	if err := commonutil.SetCurrentContainerImages(currentService); err != nil {
 		log.Errorf("failed to ser set container images, err: %s", err)
-		//return err
 	} else if containersChanged(oldContainers, currentService.Containers) {
 		err = commonrepo.NewProductionServiceColl().UpdateServiceContainers(currentService)
 		if err != nil {
@@ -262,6 +278,14 @@ func DeleteProductionServiceTemplate(serviceName, productName string, log *zap.S
 			log.Errorf("DeleteServiceTemplate Update %s error: %v", serviceName, err)
 			return e.ErrDeleteTemplate.AddDesc(err.Error())
 		}
+
+		// TODO optimze me: Do we need to delete helm charts form S3?
+		//if productTempl.IsHelmProduct() {
+		//	if err = fs.DeleteArchivedFileFromS3([]string{serviceName}, configbase.ObjectStorageProductionServicePath(productName, serviceName), log); err != nil {
+		//		log.Warnf("Failed to delete file %s, err: %s", serviceName, err)
+		//	}
+		//}
+
 	}
 	return nil
 }
@@ -293,6 +317,7 @@ func getProductionServiceOption(args *models.Service, log *zap.SugaredLogger) (*
 	}
 
 	serviceOption.VariableYaml = args.VariableYaml
+	serviceOption.ServiceVariableKVs = args.ServiceVariableKVs
 
 	serviceOption.Yaml = args.Yaml
 	return serviceOption, nil

@@ -21,11 +21,13 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	"github.com/koderover/zadig/pkg/tool/apollo"
-	"github.com/koderover/zadig/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/util"
+	"github.com/koderover/zadig/v2/pkg/tool/apollo"
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
 )
 
 type ApolloJob struct {
@@ -61,6 +63,9 @@ func (j *ApolloJob) SetPreset() error {
 			continue
 		}
 		for _, item := range result.Items {
+			if item.Key == "" {
+				continue
+			}
 			namespace.KeyValList = append(namespace.KeyValList, &commonmodels.ApolloKV{
 				Key: item.Key,
 				Val: item.Value,
@@ -93,7 +98,9 @@ func (j *ApolloJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 		return resp, err
 	}
 	j.job.Spec = j.spec
-
+	if len(j.spec.NamespaceList) == 0 {
+		return nil, errors.New("apollo issue list is empty")
+	}
 	jobTask := &commonmodels.JobTask{
 		Name: j.job.Name,
 		JobInfo: map[string]string{
@@ -119,11 +126,11 @@ func (j *ApolloJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 
 func (j *ApolloJob) LintJob() error {
 	j.spec = &commonmodels.ApolloJobSpec{}
+	if err := util.CheckZadigXLicenseStatus(); err != nil {
+		return e.ErrLicenseInvalid.AddDesc("")
+	}
 	if err := commonmodels.IToiYaml(j.job.Spec, j.spec); err != nil {
 		return err
-	}
-	if len(j.spec.NamespaceList) == 0 {
-		return errors.New("issue list is empty")
 	}
 	if _, err := mongodb.NewConfigurationManagementColl().GetApolloByID(context.Background(), j.spec.ApolloID); err != nil {
 		return errors.Errorf("not found apollo in mongo, err: %v", err)

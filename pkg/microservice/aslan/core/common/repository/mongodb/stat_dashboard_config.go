@@ -24,9 +24,9 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	mongotool "github.com/koderover/zadig/pkg/tool/mongo"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	mongotool "github.com/koderover/zadig/v2/pkg/tool/mongo"
 )
 
 type StatDashboardConfigColl struct {
@@ -111,4 +111,29 @@ func (c *StatDashboardConfigColl) Delete(ctx context.Context, key string) error 
 
 	_, err := c.DeleteOne(context.TODO(), query)
 	return err
+}
+
+type ConfigOption struct {
+	Type    string `bson:"type"`
+	ItemKey string `bson:"item_key"`
+}
+
+func (c *StatDashboardConfigColl) FindByOptions(opts *ConfigOption) (*models.StatDashboardConfig, error) {
+	if opts == nil {
+		return nil, errors.New("statistics dashboard configuration is nil")
+	}
+	query := bson.M{}
+	if opts.Type != "" {
+		query["type"] = opts.Type
+	}
+	if opts.ItemKey != "" {
+		query["item_key"] = opts.ItemKey
+	}
+
+	resp := &models.StatDashboardConfig{}
+	err := c.FindOne(context.Background(), query).Decode(resp)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }

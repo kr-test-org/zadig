@@ -21,14 +21,28 @@ import (
 	"fmt"
 
 	"github.com/gin-gonic/gin"
-
-	svcservice "github.com/koderover/zadig/pkg/microservice/aslan/core/service/service"
-	internalhandler "github.com/koderover/zadig/pkg/shared/handler"
+	svcservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/service/service"
+	internalhandler "github.com/koderover/zadig/v2/pkg/shared/handler"
 )
 
+// @Summary Load service from yaml template
+// @Description Load service from yaml template
+// @Tags 	service
+// @Accept 	json
+// @Produce json
+// @Param 	body 	body 		svcservice.LoadServiceFromYamlTemplateReq 	true 	"body"
+// @Success 200
+// @Router /api/aslan/service/template/load [post]
 func LoadServiceFromYamlTemplate(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
 
 	req := new(svcservice.LoadServiceFromYamlTemplateReq)
 
@@ -40,28 +54,77 @@ func LoadServiceFromYamlTemplate(c *gin.Context) {
 	bs, _ := json.Marshal(req)
 	internalhandler.InsertOperationLog(c, ctx.UserName, req.ProjectName, "新增", "项目管理-服务", fmt.Sprintf("服务名称:%s", req.ServiceName), string(bs), ctx.Logger)
 
+	// authorization checks
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[req.ProjectName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+		if !ctx.Resources.ProjectAuthInfo[req.ProjectName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[req.ProjectName].Service.Create {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
+
 	ctx.Err = svcservice.LoadServiceFromYamlTemplate(ctx.UserName, req, false, ctx.Logger)
 }
 
-func LoadServiceFromYamlTemplateOpenAPI(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+func LoadProductionServiceFromYamlTemplate(c *gin.Context) {
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
-	req := new(svcservice.OpenAPILoadServiceFromYamlTemplateReq)
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
+
+	req := new(svcservice.LoadServiceFromYamlTemplateReq)
+
 	if err := c.ShouldBindJSON(req); err != nil {
 		ctx.Err = err
 		return
 	}
 
 	bs, _ := json.Marshal(req)
-	internalhandler.InsertOperationLog(c, ctx.UserName+"(OpenAPI)", req.ProjectKey, "新增", "项目管理-服务", fmt.Sprintf("服务名称:%s", req.ServiceName), string(bs), ctx.Logger)
+	internalhandler.InsertOperationLog(c, ctx.UserName, req.ProjectName, "新增", "项目管理-生产服务", fmt.Sprintf("服务名称:%s", req.ServiceName), string(bs), ctx.Logger)
 
-	ctx.Err = svcservice.OpenAPILoadServiceFromYamlTemplate(ctx.UserName, req, false, ctx.Logger)
+	// authorization checks
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[req.ProjectName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+		if !ctx.Resources.ProjectAuthInfo[req.ProjectName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[req.ProjectName].ProductionService.Create {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
+
+	ctx.Err = svcservice.LoadProductionServiceFromYamlTemplate(ctx.UserName, req, false, ctx.Logger)
 }
 
+// @Summary Reload service from yaml template
+// @Description Reload service from yaml template
+// @Tags 	service
+// @Accept 	json
+// @Produce json
+// @Param 	body 	body 		svcservice.LoadServiceFromYamlTemplateReq 	true 	"body"
+// @Success 200
+// @Router /api/aslan/service/template/reload [post]
 func ReloadServiceFromYamlTemplate(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
 
 	req := new(svcservice.LoadServiceFromYamlTemplateReq)
 	if err := c.ShouldBindJSON(req); err != nil {
@@ -72,7 +135,56 @@ func ReloadServiceFromYamlTemplate(c *gin.Context) {
 	bs, _ := json.Marshal(req)
 	internalhandler.InsertOperationLog(c, ctx.UserName, req.ProjectName, "更新", "项目管理-服务", fmt.Sprintf("服务名称:%s", req.ServiceName), string(bs), ctx.Logger)
 
+	// authorization checks
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[req.ProjectName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+		if !ctx.Resources.ProjectAuthInfo[req.ProjectName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[req.ProjectName].Service.Edit {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
+
 	ctx.Err = svcservice.ReloadServiceFromYamlTemplate(ctx.UserName, req, ctx.Logger)
+}
+
+func ReloadProductionServiceFromYamlTemplate(c *gin.Context) {
+	ctx, err := internalhandler.NewContextWithAuthorization(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	if err != nil {
+
+		ctx.Err = fmt.Errorf("authorization Info Generation failed: err %s", err)
+		ctx.UnAuthorized = true
+		return
+	}
+
+	req := new(svcservice.LoadServiceFromYamlTemplateReq)
+	if err := c.ShouldBindJSON(req); err != nil {
+		ctx.Err = err
+		return
+	}
+
+	bs, _ := json.Marshal(req)
+	internalhandler.InsertOperationLog(c, ctx.UserName, req.ProjectName, "更新", "项目管理-生产服务", fmt.Sprintf("服务名称:%s", req.ServiceName), string(bs), ctx.Logger)
+
+	// authorization checks
+	if !ctx.Resources.IsSystemAdmin {
+		if _, ok := ctx.Resources.ProjectAuthInfo[req.ProjectName]; !ok {
+			ctx.UnAuthorized = true
+			return
+		}
+		if !ctx.Resources.ProjectAuthInfo[req.ProjectName].IsProjectAdmin &&
+			!ctx.Resources.ProjectAuthInfo[req.ProjectName].ProductionService.Edit {
+			ctx.UnAuthorized = true
+			return
+		}
+	}
+
+	ctx.Err = svcservice.ReloadProductionServiceFromYamlTemplate(ctx.UserName, req, ctx.Logger)
 }
 
 func PreviewServiceYamlFromYamlTemplate(c *gin.Context) {

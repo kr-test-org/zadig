@@ -20,17 +20,27 @@ import (
 	"fmt"
 	"strings"
 
+	e "github.com/koderover/zadig/v2/pkg/tool/errors"
+	"github.com/pkg/errors"
+	"go.uber.org/zap"
 	"golang.org/x/exp/slices"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	templaterepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb/template"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/repository"
-	commonutil "github.com/koderover/zadig/pkg/microservice/aslan/core/common/util"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/util"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	templaterepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb/template"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/kube"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service/repository"
+	commontypes "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/types"
+	aslanUtil "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/util"
+	commonutil "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/util"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/util"
+)
+
+const (
+	ENVNAMEKEY = "envName"
 )
 
 type DeployJob struct {
@@ -73,6 +83,8 @@ func (j *DeployJob) getOriginReferedJobTargets(jobName string) ([]*commonmodels.
 						ServiceModule: build.ServiceModule,
 						Image:         build.Image,
 					})
+					log.Infof("DeployJob ToJobs getOriginReferedJobTargets: workflow %s service %s, module %s, image %s",
+						j.workflow.Name, build.ServiceName, build.ServiceModule, build.Image)
 				}
 				return serviceAndImages, nil
 			}
@@ -81,7 +93,7 @@ func (j *DeployJob) getOriginReferedJobTargets(jobName string) ([]*commonmodels.
 				if err := commonmodels.IToi(job.Spec, distributeSpec); err != nil {
 					return serviceAndImages, err
 				}
-				for _, distribute := range distributeSpec.Tatgets {
+				for _, distribute := range distributeSpec.Targets {
 					serviceAndImages = append(serviceAndImages, &commonmodels.ServiceAndImage{
 						ServiceName:   distribute.ServiceName,
 						ServiceModule: distribute.ServiceModule,
@@ -127,6 +139,7 @@ func (j *DeployJob) SetPreset() error {
 			return fmt.Errorf("failed to get max revision services map, productName %s, isProduction %v, err: %w", product.ProductName, product.Production, err)
 		}
 
+		// update image name
 		for _, svc := range j.spec.ServiceAndImages {
 			productSvc := product.GetServiceMap()[svc.ServiceName]
 			if productSvc == nil {
@@ -187,6 +200,7 @@ func (j *DeployJob) MergeArgs(args *commonmodels.Job) error {
 func (j *DeployJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 	resp := []*commonmodels.JobTask{}
 	j.spec = &commonmodels.ZadigDeployJobSpec{}
+
 	if err := commonmodels.IToi(j.job.Spec, j.spec); err != nil {
 		return resp, err
 	}
@@ -205,8 +219,9 @@ func (j *DeployJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 	}
 
 	productServiceMap := product.GetServiceMap()
+	workloadTypeMap := make(map[string]string)
 
-	if project.ProductFeature != nil && project.ProductFeature.CreateEnvType == setting.SourceFromExternal {
+	if project.IsHostProduct() {
 		productServices, err := commonrepo.NewServiceColl().ListExternalWorkloadsBy(j.workflow.Project, envName)
 		if err != nil {
 			return resp, fmt.Errorf("failed to list external workload, err: %v", err)
@@ -216,6 +231,7 @@ func (j *DeployJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 				ServiceName: service.ServiceName,
 				Containers:  service.Containers,
 			}
+			workloadTypeMap[service.ServiceName] = service.WorkloadType
 		}
 		servicesInExternalEnv, _ := commonrepo.NewServicesInExternalEnvColl().List(&commonrepo.ServicesInExternalEnvArgs{
 			ProductName: j.workflow.Project,
@@ -270,9 +286,10 @@ func (j *DeployJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 				DeployContents:     j.spec.DeployContents,
 				Timeout:            timeout,
 			}
+
 			for _, deploy := range deploys {
 				// if external env, check service exists
-				if project.ProductFeature.CreateEnvType == "external" {
+				if project.IsHostProduct() {
 					if err := checkServiceExsistsInEnv(productServiceMap, serviceName, envName); err != nil {
 						return resp, err
 					}
@@ -283,28 +300,114 @@ func (j *DeployJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 					ServiceModule: deploy.ServiceModule,
 				})
 			}
-			if project.ProductFeature.CreateEnvType != "external" {
+			if !project.IsHostProduct() {
 				jobTaskSpec.DeployContents = j.spec.DeployContents
 				jobTaskSpec.Production = j.spec.Production
 				service := serviceMap[serviceName]
 				if service != nil {
 					jobTaskSpec.UpdateConfig = service.UpdateConfig
-					jobTaskSpec.KeyVals = service.KeyVals
+					jobTaskSpec.VariableConfigs = service.VariableConfigs
+					if service.UpdateConfig {
+						jobTaskSpec.VariableKVs = service.LatestVariableKVs
+					} else {
+						jobTaskSpec.VariableKVs = service.VariableKVs
+					}
+
+					serviceRender := product.GetSvcRender(serviceName)
+					svcRenderVarMap := map[string]*commontypes.RenderVariableKV{}
+					for _, varKV := range serviceRender.OverrideYaml.RenderVariableKVs {
+						svcRenderVarMap[varKV.Key] = varKV
+					}
+
+					// filter variables that used global variable
+					filterdKV := []*commontypes.RenderVariableKV{}
+					for _, jobKV := range jobTaskSpec.VariableKVs {
+						svcKV, ok := svcRenderVarMap[jobKV.Key]
+						if !ok {
+							// deploy new variable
+							filterdKV = append(filterdKV, jobKV)
+							continue
+						}
+						// deploy existed variable
+						if svcKV.UseGlobalVariable {
+							continue
+						}
+						filterdKV = append(filterdKV, jobKV)
+					}
+					jobTaskSpec.VariableKVs = filterdKV
 				}
 				// if only deploy images, clear keyvals
 				if onlyDeployImage(j.spec.DeployContents) {
-					jobTaskSpec.KeyVals = []*commonmodels.ServiceKeyVal{}
+					jobTaskSpec.VariableConfigs = []*commonmodels.DeplopyVariableConfig{}
+					jobTaskSpec.VariableKVs = []*commontypes.RenderVariableKV{}
 				}
 			}
 			jobTask := &commonmodels.JobTask{
 				Name: jobNameFormat(serviceName + "-" + j.job.Name),
 				Key:  strings.Join([]string{j.job.Name, serviceName}, "."),
 				JobInfo: map[string]string{
-					JobNameKey:     j.job.Name,
-					"service_name": serviceName,
+					JobNameKey:      j.job.Name,
+					"service_name":  serviceName,
+					"workload_type": workloadTypeMap[serviceName],
 				},
 				JobType: string(config.JobZadigDeploy),
 				Spec:    jobTaskSpec,
+			}
+			if jobTaskSpec.CreateEnvType == "system" {
+				var updateRevision bool
+				if slices.Contains(jobTaskSpec.DeployContents, config.DeployConfig) && jobTaskSpec.UpdateConfig {
+					updateRevision = true
+				}
+
+				varsYaml := ""
+				varKVs := []*commontypes.RenderVariableKV{}
+				if slices.Contains(jobTaskSpec.DeployContents, config.DeployVars) {
+					varsYaml, err = commontypes.RenderVariableKVToYaml(jobTaskSpec.VariableKVs)
+					if err != nil {
+						return nil, errors.Errorf("generate vars yaml error: %v", err)
+					}
+					varKVs = jobTaskSpec.VariableKVs
+				}
+				containers := []*commonmodels.Container{}
+				if slices.Contains(jobTaskSpec.DeployContents, config.DeployImage) {
+					if j.spec.Source == config.SourceFromJob {
+						for _, serviceImage := range jobTaskSpec.ServiceAndImages {
+							containers = append(containers, &commonmodels.Container{
+								Name:      serviceImage.ServiceModule,
+								Image:     "{{ NOT BE RENDERED }}",
+								ImageName: "{{ NOT BE RENDERED }}",
+							})
+						}
+					} else {
+						for _, serviceImage := range jobTaskSpec.ServiceAndImages {
+							containers = append(containers, &commonmodels.Container{
+								Name:      serviceImage.ServiceModule,
+								Image:     serviceImage.Image,
+								ImageName: util.ExtractImageName(serviceImage.Image),
+							})
+						}
+					}
+				}
+
+				option := &kube.GeneSvcYamlOption{
+					ProductName:           j.workflow.Project,
+					EnvName:               jobTaskSpec.Env,
+					ServiceName:           jobTaskSpec.ServiceName,
+					UpdateServiceRevision: updateRevision,
+					VariableYaml:          varsYaml,
+					VariableKVs:           varKVs,
+					Containers:            containers,
+				}
+				updatedYaml, _, _, err := kube.GenerateRenderedYaml(option)
+				if err != nil {
+					return nil, errors.Errorf("generate service yaml error: %v", err)
+				}
+				jobTaskSpec.YamlContent = updatedYaml
+			}
+
+			for _, image := range jobTaskSpec.ServiceAndImages {
+				log.Infof("DeployJob ToJobs %d: workflow %s service %s, module %s, image %s",
+					taskID, j.workflow.Name, serviceName, image.ServiceModule, image.Image)
 			}
 			resp = append(resp, jobTask)
 		}
@@ -320,11 +423,11 @@ func (j *DeployJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 				serviceRevision = pSvc.Revision
 			}
 
-			revisionSvc, err := commonrepo.NewServiceColl().Find(&commonrepo.ServiceFindOption{
+			revisionSvc, err := repository.QueryTemplateService(&commonrepo.ServiceFindOption{
 				ServiceName: serviceName,
 				Revision:    serviceRevision,
 				ProductName: product.ProductName,
-			})
+			}, product.Production)
 			if err != nil {
 				return nil, fmt.Errorf("failed to find service: %s with revision: %d, err: %s", serviceName, serviceRevision, err)
 			}
@@ -339,17 +442,18 @@ func (j *DeployJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 				ClusterID:          product.ClusterID,
 				ReleaseName:        releaseName,
 				Timeout:            timeout,
+				IsProduction:       j.spec.Production,
 			}
+
 			for _, deploy := range deploys {
 				service := serviceMap[serviceName]
 				if service != nil {
 					jobTaskSpec.UpdateConfig = service.UpdateConfig
 					jobTaskSpec.KeyVals = service.KeyVals
+					jobTaskSpec.VariableYaml = service.VariableYaml
+					jobTaskSpec.UserSuppliedValue = jobTaskSpec.VariableYaml
 				}
 
-				if err := checkServiceExsistsInEnv(productServiceMap, serviceName, envName); err != nil {
-					return resp, err
-				}
 				jobTaskSpec.ImageAndModules = append(jobTaskSpec.ImageAndModules, &commonmodels.ImageAndServiceModule{
 					ServiceModule: deploy.ServiceModule,
 					Image:         deploy.Image,
@@ -389,6 +493,17 @@ func (j *DeployJob) LintJob() error {
 	if err := commonmodels.IToiYaml(j.job.Spec, j.spec); err != nil {
 		return err
 	}
+	if err := aslanUtil.CheckZadigXLicenseStatus(); err != nil {
+		if j.spec.Production {
+			return e.ErrLicenseInvalid.AddDesc("生产环境功能需要专业版才能使用")
+		}
+
+		for _, item := range j.spec.DeployContents {
+			if item == config.DeployVars || item == config.DeployConfig {
+				return e.ErrLicenseInvalid.AddDesc("基础版仅能部署镜像")
+			}
+		}
+	}
 	if j.spec.Source != config.SourceFromJob {
 		return nil
 	}
@@ -398,4 +513,12 @@ func (j *DeployJob) LintJob() error {
 		return fmt.Errorf("can not quote job %s in job %s", j.spec.JobName, j.job.Name)
 	}
 	return nil
+}
+
+func (j *DeployJob) GetOutPuts(log *zap.SugaredLogger) []string {
+	return getOutputKey(j.job.Name, ensureDeployInOutputs())
+}
+
+func ensureDeployInOutputs() []*commonmodels.Output {
+	return []*commonmodels.Output{{Name: ENVNAMEKEY}}
 }

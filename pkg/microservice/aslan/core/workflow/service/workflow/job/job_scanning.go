@@ -23,15 +23,15 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/config"
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
-	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/tool/sonar"
-	"github.com/koderover/zadig/pkg/types"
-	"github.com/koderover/zadig/pkg/types/step"
+	"github.com/koderover/zadig/v2/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/models"
+	commonrepo "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/repository/mongodb"
+	commonservice "github.com/koderover/zadig/v2/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/tool/sonar"
+	"github.com/koderover/zadig/v2/pkg/types"
+	"github.com/koderover/zadig/v2/pkg/types/step"
 )
 
 type ScanningJob struct {
@@ -163,10 +163,13 @@ func (j *ScanningJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 			Timeout: timeout,
 			Outputs: scanningInfo.Outputs,
 		}
-		scanningNameKV := &commonmodels.KeyVal{
+		envs := getScanningJobVariables(scanning.Repos, taskID, j.workflow.Project, j.workflow.Name, j.workflow.DisplayName, "")
+		envs = append(envs, &commonmodels.KeyVal{
 			Key:   "SCANNING_NAME",
 			Value: scanning.Name,
-		}
+		})
+		envs = append(envs, scanningInfo.Envs...)
+
 		scanningImage := basicImage.Value
 		if basicImage.ImageFrom == commonmodels.ImageFromKoderover {
 			scanningImage = strings.ReplaceAll(config.ReaperImage(), "${BuildOS}", basicImage.Value)
@@ -176,11 +179,19 @@ func (j *ScanningJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 			ResourceRequest:     scanningInfo.AdvancedSetting.ResReq,
 			ResReqSpec:          scanningInfo.AdvancedSetting.ResReqSpec,
 			ClusterID:           scanningInfo.AdvancedSetting.ClusterID,
+			StrategyID:          scanningInfo.AdvancedSetting.StrategyID,
 			BuildOS:             scanningImage,
 			ImageFrom:           setting.ImageFromCustom,
-			Envs:                []*commonmodels.KeyVal{scanningNameKV},
+			Envs:                envs,
 			Registries:          registries,
 			ShareStorageDetails: getShareStorageDetail(j.workflow.ShareStorages, scanning.ShareStorageInfo, j.workflow.Name, taskID),
+		}
+
+		if len(scanning.Repos) > 0 {
+			jobTaskSpec.Properties.Envs = append(jobTaskSpec.Properties.Envs, &commonmodels.KeyVal{
+				Key:   "BRANCH",
+				Value: scanning.Repos[0].Branch,
+			})
 		}
 
 		// init tools install step
@@ -209,7 +220,12 @@ func (j *ScanningJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 		repoName := ""
 		branch := ""
 		if len(scanningInfo.Repos) > 0 {
-			repoName = scanningInfo.Repos[0].RepoName
+			if scanningInfo.Repos[0].CheckoutPath != "" {
+				repoName = scanningInfo.Repos[0].CheckoutPath
+			} else {
+				repoName = scanningInfo.Repos[0].RepoName
+			}
+
 			branch = scanningInfo.Repos[0].Branch
 		}
 		// init debug before step
@@ -226,7 +242,7 @@ func (j *ScanningJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 				JobName:  jobTask.Name,
 				StepType: config.StepShell,
 				Spec: &step.StepShellSpec{
-					Scripts:     append(strings.Split(replaceWrapLine(scanningInfo.PreScript), "\n"), outputScript(scanningInfo.Outputs)...),
+					Scripts:     append(strings.Split(replaceWrapLine(scanningInfo.Script), "\n"), outputScript(scanningInfo.Outputs)...),
 					SkipPrepare: true,
 				},
 			}
@@ -249,19 +265,32 @@ func (j *ScanningJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 				Value: resultAddr,
 			}
 			jobTaskSpec.Properties.Envs = append(jobTaskSpec.Properties.Envs, sonarLinkKeyVal)
-			sonarConfig := fmt.Sprintf("sonar.login=%s\nsonar.host.url=%s\n%s", sonarInfo.Token, sonarInfo.ServerAddress, scanningInfo.Parameter)
-			sonarConfig = strings.ReplaceAll(sonarConfig, "$branch", branch)
-			sonarScript := fmt.Sprintf("set -e\ncd %s\ncat > sonar-project.properties << EOF\n%s\nEOF\nsonar-scanner", repoName, sonarConfig)
-			sonarShellStep := &commonmodels.StepTask{
-				Name:     scanning.Name + "-sonar-shell",
-				JobName:  jobTask.Name,
-				StepType: config.StepShell,
-				Spec: &step.StepShellSpec{
-					Scripts:     strings.Split(replaceWrapLine(sonarScript), "\n"),
-					SkipPrepare: true,
-				},
+			jobTaskSpec.Properties.Envs = append(jobTaskSpec.Properties.Envs, &commonmodels.KeyVal{
+				Key:          "SONAR_TOKEN",
+				Value:        sonarInfo.Token,
+				IsCredential: true,
+			})
+
+			jobTaskSpec.Properties.Envs = append(jobTaskSpec.Properties.Envs, &commonmodels.KeyVal{
+				Key:   "SONAR_URL",
+				Value: sonarInfo.ServerAddress,
+			})
+
+			if scanningInfo.EnableScanner {
+				sonarConfig := fmt.Sprintf("sonar.login=%s\nsonar.host.url=%s\n%s", sonarInfo.Token, sonarInfo.ServerAddress, scanningInfo.Parameter)
+				sonarConfig = strings.ReplaceAll(sonarConfig, "$branch", branch)
+				sonarScript := fmt.Sprintf("set -e\ncd %s\ncat > sonar-project.properties << EOF\n%s\nEOF\nsonar-scanner", repoName, sonarConfig)
+				sonarShellStep := &commonmodels.StepTask{
+					Name:     scanning.Name + "-sonar-shell",
+					JobName:  jobTask.Name,
+					StepType: config.StepShell,
+					Spec: &step.StepShellSpec{
+						Scripts:     strings.Split(replaceWrapLine(sonarScript), "\n"),
+						SkipPrepare: true,
+					},
+				}
+				jobTaskSpec.Steps = append(jobTaskSpec.Steps, sonarShellStep)
 			}
-			jobTaskSpec.Steps = append(jobTaskSpec.Steps, sonarShellStep)
 
 			if scanningInfo.CheckQualityGate {
 				sonarChekStep := &commonmodels.StepTask{
@@ -325,4 +354,15 @@ func (j *ScanningJob) GetOutPuts(log *zap.SugaredLogger) []string {
 		resp = append(resp, getOutputKey(jobKey, scanningInfo.Outputs)...)
 	}
 	return resp
+}
+
+func getScanningJobVariables(repos []*types.Repository, taskID int64, project, workflowName, workflowDisplayName, infrastructure string) []*commonmodels.KeyVal {
+	ret := []*commonmodels.KeyVal{}
+
+	// basic envs
+	ret = append(ret, PrepareDefaultWorkflowTaskEnvs(project, workflowName, workflowDisplayName, infrastructure, taskID)...)
+	// repo envs
+	ret = append(ret, getReposVariables(repos)...)
+
+	return ret
 }

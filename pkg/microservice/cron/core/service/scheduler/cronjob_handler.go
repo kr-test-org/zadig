@@ -26,15 +26,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nsqio/go-nsq"
 	"github.com/rfyiamcool/cronlib"
 
-	"github.com/koderover/zadig/pkg/microservice/cron/core/service"
-	"github.com/koderover/zadig/pkg/microservice/cron/core/service/client"
-	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/tool/httpclient"
-	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/util"
+	"github.com/koderover/zadig/v2/pkg/microservice/cron/core/service"
+	"github.com/koderover/zadig/v2/pkg/microservice/cron/core/service/client"
+	"github.com/koderover/zadig/v2/pkg/setting"
+	"github.com/koderover/zadig/v2/pkg/tool/httpclient"
+	"github.com/koderover/zadig/v2/pkg/tool/log"
+	"github.com/koderover/zadig/v2/pkg/util"
 )
 
 const (
@@ -125,30 +124,24 @@ func InitExistedCronjob(client *client.Client, scheduler *cronlib.CronSchduler) 
 }
 
 // HandleMessage ...
-func (h *CronjobHandler) HandleMessage(message *nsq.Message) error {
-	fmt.Printf("MESSAGE IN: %s, ATTEMPT: %d\n", message.Body, message.Attempts)
-
-	var msg *service.CronjobPayload
-	if err := json.Unmarshal(message.Body, &msg); err != nil {
-		log.Errorf("unmarshal CancelMessage error: %v", err)
-		return nil
-	}
-
-	switch msg.Action {
-	case setting.TypeEnableCronjob:
-		err := h.updateCronjob(msg.Name, msg.ProductName, msg.JobType, msg.JobList, msg.DeleteList)
-		if err != nil {
-			log.Errorf("Failed to update cronjob, the error is: %v", err)
-			return err
+func (h *CronjobHandler) HandleMessage(msgs []*service.CronjobPayload) error {
+	for _, msg := range msgs {
+		switch msg.Action {
+		case setting.TypeEnableCronjob:
+			err := h.updateCronjob(msg.Name, msg.ProductName, msg.JobType, msg.JobList, msg.DeleteList)
+			if err != nil {
+				log.Errorf("Failed to update cronjob, the error is: %v", err)
+				return err
+			}
+		case setting.TypeDisableCronjob:
+			err := h.stopCronjob(msg.Name, msg.JobType)
+			if err != nil {
+				log.Errorf("Failed to stop all cron job, the error is: %v", err)
+				return err
+			}
+		default:
+			log.Errorf("unsupported cronjob action: NOT RECONSUMING")
 		}
-	case setting.TypeDisableCronjob:
-		err := h.stopCronjob(msg.Name, msg.JobType)
-		if err != nil {
-			log.Errorf("Failed to stop all cron job, the error is: %v", err)
-			return err
-		}
-	default:
-		log.Errorf("unsupported cronjob action: NOT RECONSUMING")
 	}
 
 	return nil
@@ -186,6 +179,16 @@ func (h *CronjobHandler) updateCronjob(name, productName, jobType string, jobLis
 			}
 		case setting.WorkflowV4Cronjob:
 			err := h.registerWorkFlowV4Job(name, cron, job)
+			if err != nil {
+				return err
+			}
+		case setting.EnvAnalysisCronjob:
+			err := h.registerEnvAnalysisJob(name, cron, job)
+			if err != nil {
+				return err
+			}
+		case setting.EnvSleepCronjob:
+			err := h.registerEnvSleepJob(name, cron, job)
 			if err != nil {
 				return err
 			}
@@ -452,6 +455,70 @@ func registerCronjob(job *service.Cronjob, client *client.Client, scheduler *cro
 	default:
 		fmt.Printf("Not supported type of service: %s\n", job.Type)
 		return errors.New("not supported service type")
+	}
+	return nil
+}
+
+func (h *CronjobHandler) registerEnvAnalysisJob(name, schedule string, job *service.Schedule) error {
+	if job.EnvAnalysisArgs == nil {
+		return nil
+	}
+	scheduleJob, err := cronlib.NewJobModel(schedule, func() {
+		base := "environment/environments/"
+		if job.EnvAnalysisArgs.Production {
+			base = "environment/production/environments/"
+		}
+		url := base + fmt.Sprintf("%s/analysis?projectName=%s&triggerName=%s&userName=%s", job.EnvAnalysisArgs.EnvName, job.EnvAnalysisArgs.ProductName, setting.CronTaskCreator, setting.CronTaskCreator)
+
+		if err := h.aslanCli.ScheduleCall(url, nil, log.SugaredLogger()); err != nil {
+			log.Errorf("[%s]RunScheduledTask err: %v", name, err)
+		}
+	})
+	if err != nil {
+		log.Errorf("Failed to create job of ID: %s, the error is: %v", job.ID.Hex(), err)
+		return err
+	}
+
+	log.Infof("registering jobID: %s with cron: %s", job.ID.Hex(), schedule)
+	err = h.Scheduler.UpdateJobModel(job.ID.Hex(), scheduleJob)
+	if err != nil {
+		log.Errorf("Failed to register job of ID: %s to scheduler, the error is: %v", job.ID, err)
+		return err
+	}
+	return nil
+}
+
+func (h *CronjobHandler) registerEnvSleepJob(name, schedule string, job *service.Schedule) error {
+	if job.EnvArgs == nil {
+		return nil
+	}
+	scheduleJob, err := cronlib.NewJobModel(schedule, func() {
+		base := "environment/environments/"
+		if job.EnvArgs.Production {
+			base = "environment/production/environments/"
+		}
+
+		url := ""
+		if job.EnvArgs.Name == util.GetEnvSleepCronName(job.EnvArgs.ProductName, job.EnvArgs.EnvName, true) {
+			url = base + fmt.Sprintf("%s/sleep?projectName=%s&action=enable", job.EnvArgs.EnvName, job.EnvArgs.ProductName)
+		} else if job.EnvArgs.Name == util.GetEnvSleepCronName(job.EnvArgs.ProductName, job.EnvArgs.EnvName, false) {
+			url = base + fmt.Sprintf("%s/sleep?projectName=%s&action=disable", job.EnvArgs.EnvName, job.EnvArgs.ProductName)
+		}
+
+		if err := h.aslanCli.ScheduleCall(url, nil, log.SugaredLogger()); err != nil {
+			log.Errorf("[%s]RunScheduledTask err: %v", name, err)
+		}
+	})
+	if err != nil {
+		log.Errorf("Failed to create job of ID: %s, the error is: %v", job.ID.Hex(), err)
+		return err
+	}
+
+	log.Infof("registering jobID: %s with cron: %s", job.ID.Hex(), schedule)
+	err = h.Scheduler.UpdateJobModel(job.ID.Hex(), scheduleJob)
+	if err != nil {
+		log.Errorf("Failed to register job of ID: %s to scheduler, the error is: %v", job.ID, err)
+		return err
 	}
 	return nil
 }
